@@ -264,8 +264,9 @@ def gerar_pdf(df_p, info_o, d_ini, d_fim):
         el = f"{r['Elemento']} ({r['Dias Elemento']}d)" if r["Elemento"] else "-"
         me = f"{r['Meio']} ({r['Dias Meio']}d)" if r["Meio"] else "-"
         ma = f"{r['Material']} ({r['Qtd Material']})" if r["Material"] else "-"
+        data_fmt = r["Data_dt"].strftime("%d/%m/%Y") if pd.notna(r["Data_dt"]) else str(r["Data"])
 
-        pdf.cell(20, 6, str(r["Data"]), 1)
+        pdf.cell(20, 6, data_fmt, 1)
         pdf.cell(35, 6, el[:22].encode("latin-1", "replace").decode("latin-1"), 1)
         pdf.cell(30, 6, me[:19].encode("latin-1", "replace").decode("latin-1"), 1)
         pdf.cell(42, 6, ma[:26].encode("latin-1", "replace").decode("latin-1"), 1)
@@ -286,7 +287,9 @@ with aba_pdf:
     d_fim = c_d2.date_input("Até", value=date.today())
 
     df_p = df_diario[df_diario["ID Obra"] == obra_pdf].copy()
-    df_p["Data_dt"] = pd.to_datetime(df_p["Data"], format="mixed", dayfirst=True, errors="coerce")
+    df_p["Data_dt"] = pd.to_datetime(
+        df_p["Data"], format="mixed", dayfirst=True, errors="coerce", utc=True
+    ).dt.tz_localize(None)
     df_p = df_p[
         df_p["Data_dt"].notna()
         & (df_p["Data_dt"] >= pd.Timestamp(d_ini))
