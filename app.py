@@ -152,7 +152,8 @@ with aba_registo:
         if total_dia <= 0 and not notas:
             st.error("Preenche pelo menos um elemento, meio, material ou nota.")
         else:
-            novo_id = int(pd.to_numeric(df_diario["ID_Registo"], errors="coerce").max() or 0) + 1
+            max_id = pd.to_numeric(df_diario["ID_Registo"], errors="coerce").max()
+            novo_id = int(0 if pd.isna(max_id) else max_id) + 1
             nova_linha = pd.DataFrame([{
                 "ID_Registo": novo_id,
                 "Data": data_reg.strftime("%d/%m/%Y"),
@@ -285,8 +286,12 @@ with aba_pdf:
     d_fim = c_d2.date_input("Até", value=date.today())
 
     df_p = df_diario[df_diario["ID Obra"] == obra_pdf].copy()
-    df_p["Data_dt"] = pd.to_datetime(df_p["Data"], format="%d/%m/%Y", errors="coerce").dt.date
-    df_p = df_p[(df_p["Data_dt"] >= d_ini) & (df_p["Data_dt"] <= d_fim)]
+    df_p["Data_dt"] = pd.to_datetime(df_p["Data"], format="mixed", dayfirst=True, errors="coerce")
+    df_p = df_p[
+        df_p["Data_dt"].notna()
+        & (df_p["Data_dt"] >= pd.Timestamp(d_ini))
+        & (df_p["Data_dt"] <= pd.Timestamp(d_fim))
+    ]
 
     if not df_p.empty:
         info_o_pdf = df_obras[df_obras["ID Obra"] == obra_pdf].iloc[0]
