@@ -125,7 +125,20 @@ def atualizar_saldos_obras(df_obras, df_diario):
     return df_o
 
 def parse_datas(serie):
-    return pd.to_datetime(serie, format="mixed", dayfirst=True, errors="coerce", utc=True).dt.tz_localize(None)
+    s_str = serie.fillna("").astype(str).str.strip()
+    is_iso = s_str.str.match(r"^\d{4}-\d{2}-\d{2}")
+    res = pd.Series(pd.NaT, index=s_str.index, dtype="datetime64[ns]")
+    if is_iso.any():
+        dt_iso = pd.to_datetime(s_str[is_iso], format="mixed", errors="coerce", utc=True)
+        res.loc[is_iso] = dt_iso.dt.tz_localize(None).dt.round("D")
+    if (~is_iso).any():
+        dt_pt = pd.to_datetime(s_str[~is_iso], format="mixed", dayfirst=True, errors="coerce")
+        res.loc[~is_iso] = dt_pt.dt.round("D")
+    return res
+
+def formatar_data_pt(serie):
+    dt = parse_datas(serie)
+    return dt.dt.strftime("%d/%m/%Y").fillna(serie.astype(str))
 
 # ==========================================
 # CARREGAMENTO E LIMPEZA DE TIPOS
@@ -276,7 +289,7 @@ if secao == "📝 Diário":
         else:
             max_id = pd.to_numeric(df_diario["ID_Registo"], errors="coerce").max()
             prox_id = int(0 if pd.isna(max_id) else max_id) + 1
-            data_str = data_reg.strftime("%d/%m/%Y")
+            data_iso = data_reg.strftime("%Y-%m-%d")
 
             lista_colabs = [(c, dias_por_colab[c]) for c in colabs_sel if dias_por_colab[c] > 0]
             lista_meios = [(m, dias_por_meio[m]) for m in meios_sel if dias_por_meio[m] > 0]
@@ -298,7 +311,7 @@ if secao == "📝 Diário":
                 novas_linhas.append(
                     {
                         "ID_Registo": prox_id + i,
-                        "Data": data_str,
+                        "Data": data_iso,
                         "ID Obra": obra_reg,
                         "Elemento": el_nome,
                         "Dias Elemento": el_dias,
@@ -326,6 +339,7 @@ if secao == "📝 Diário":
         st.divider()
         st.subheader("Histórico da Obra")
         df_hist_full = df_diario[df_diario["ID Obra"] == obra_reg].copy()
+        df_hist_full["Data"] = formatar_data_pt(df_hist_full["Data"])
         cols_visiveis = ["ID_Registo", "Data", "Elemento", "Dias Elemento", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
         edited_hist = st.data_editor(
             df_hist_full[cols_visiveis],
@@ -338,6 +352,8 @@ if secao == "📝 Diário":
 
         if st.button("Atualizar Histórico / Apagar Linhas", use_container_width=True):
             ed = edited_hist.copy()
+            dt_ed = parse_datas(ed["Data"])
+            ed["Data"] = dt_ed.dt.strftime("%Y-%m-%d").fillna(ed["Data"].astype(str))
             ed["ID Obra"] = obra_reg
             ed["Dias Elemento"] = pd.to_numeric(ed["Dias Elemento"], errors="coerce").fillna(0.0)
             ed["Dias Meio"] = pd.to_numeric(ed["Dias Meio"], errors="coerce").fillna(0.0)
@@ -408,172 +424,7 @@ elif secao == "👷 Presenças":
         return bytes(pdf.output())
 
     st.subheader("👷 Mapa de Presenças")
-    cp1, cp2 = st.columns(2)
-    p_ini = cp1.date_input("De", value=date.today().replace(day=1), key="ponto_ini")
-    p_fim = cp2.date_input("Até", value=date.today(), key="ponto_fim")
 
-    df_pt = df_diario[df_diario["Elemento"] != ""].copy()
-    df_pt["Data_dt"] = parse_datas(df_pt["Data"])
-    df_pt = df_pt[
-        df_pt["Data_dt"].notna()
-        & (df_pt["Data_dt"] >= pd.Timestamp(p_ini))
-        & (df_pt["Data_dt"] <= pd.Timestamp(p_fim))
-    ].sort_values(["Elemento", "Data_dt"])
-
-    colabs_disp = sorted(df_pt["Elemento"].unique().tolist())
-    filtro_colab = st.selectbox("Colaborador", ["Todos"] + colabs_disp, key="ponto_colab")
-    if filtro_colab != "Todos":
-        df_pt = df_pt[df_pt["Elemento"] == filtro_colab]
-
-    if not df_pt.empty:
-        df_pt["Data_Fmt"] = df_pt["Data_dt"].dt.strftime("%d/%m/%Y")
-        resumo_pt = (
-            df_pt.groupby("Elemento", as_index=False)
-            .agg(
-                **{
-                    "Total Dias": ("Dias Elemento", "sum"),
-                    "Obras": ("ID Obra", lambda s: ", ".join(sorted(set(s.astype(str))))),
-                }
-            )
-            .rename(columns={"Elemento": "Colaborador"})
-        )
-        st.dataframe(resumo_pt, use_container_width=True, hide_index=True)
-
-        with st.expander("Ver presenças dia a dia", expanded=True):
-            st.dataframe(
-                df_pt[["Data_Fmt", "Elemento", "ID Obra", "Dias Elemento", "Notas"]].rename(
-                    columns={"Data_Fmt": "Data", "Elemento": "Colaborador", "Dias Elemento": "Dias"}
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        pdf_ponto_bytes = gerar_pdf_ponto(resumo_pt, df_pt, p_ini, p_fim)
-        st.download_button(
-            label="📥 Descarregar Mapa de Presenças (PDF)",
-            data=pdf_ponto_bytes,
-            file_name=f"Presencas_{p_ini}_{p_fim}.pdf",
-            mime="application/pdf",
-            type="primary",
-            use_container_width=True,
-        )
-    else:
-        st.info("Sem presenças registadas nas datas selecionadas.")
-
-# ==========================================
-# SECÇÃO 3: TABELAS (OBRAS, COLABORADORES, VIATURAS, MATERIAIS)
-# ==========================================
-elif secao == "⚙️ Tabelas":
-    st.subheader("🏢 Obras Atribuídas")
-    st.caption("Para fechar uma obra, altera o Estado para 'Concluída'.")
-    ed_obras = st.data_editor(
-        df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado"]],
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        key="ed_obras",
-    )
-
-    st.subheader("👷 Colaboradores (Valor/Dia)")
-    ed_elem = st.data_editor(df_elem, num_rows="dynamic", use_container_width=True, hide_index=True, key="ed_elem")
-
-    st.subheader("🚚 Viaturas / Meios (Valor/Dia)")
-    ed_meios = st.data_editor(df_meios, num_rows="dynamic", use_container_width=True, hide_index=True, key="ed_meios")
-
-    st.subheader("📦 Materiais (Preço Unitário)")
-    ed_mat = st.data_editor(df_mat, num_rows="dynamic", use_container_width=True, hide_index=True, key="ed_mat")
-
-    if st.button("💾 Guardar Todas as Tabelas", type="primary", use_container_width=True):
-        ed_obras["Valor Adjudicado"] = pd.to_numeric(ed_obras["Valor Adjudicado"], errors="coerce").fillna(0.0)
-        ed_obras["Total Gasto"] = 0.0
-        ed_obras["Saldo Restante"] = ed_obras["Valor Adjudicado"]
-
-        atualizar_saldos_obras(ed_obras, df_diario)
-        gravar_aba("Elementos", ed_elem)
-        gravar_aba("Meios", ed_meios)
-        gravar_aba("Materiais", ed_mat)
-        st.cache_data.clear()
-        st.session_state["msg_sucesso"] = "Tabelas guardadas no Google Sheets!"
-        st.rerun()
-
-# ==========================================
-# SECÇÃO 4: GERAR FOLHA DE PRODUÇÃO E CUSTOS (PDF)
-# ==========================================
-elif secao == "📄 PDF":
-    def gerar_pdf(df_p, info_o, d_ini, d_fim):
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Helvetica", "B", 15)
-        pdf.cell(0, 10, "FOLHA DE PRODUCAO E CUSTOS DE OBRA", ln=True, align="C")
-
-        pdf.set_font("Helvetica", "", 10)
-        titulo_obra = f"{info_o['ID Obra']} - {info_o['Nome da Obra']} ({info_o['Cliente']})"
-        pdf.cell(0, 6, titulo_obra.encode("latin-1", "replace").decode("latin-1"), ln=True, align="C")
-        pdf.cell(0, 6, f"Periodo: {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')} | Estado: {info_o['Estado']}", ln=True, align="C")
-        pdf.ln(4)
-
-        pdf.set_font("Helvetica", "B", 10)
-        resumo = f"Adjudicado: {info_o['Valor Adjudicado']:,.2f} EUR | Gasto Total Obra: {info_o['Total Gasto']:,.2f} EUR | Saldo: {info_o['Saldo Restante']:,.2f} EUR"
-        pdf.cell(0, 8, resumo, ln=True)
-        pdf.ln(2)
-
-        pdf.set_font("Helvetica", "B", 8)
-        pdf.cell(20, 7, "Data", 1)
-        pdf.cell(35, 7, "Colaborador", 1)
-        pdf.cell(30, 7, "Viatura", 1)
-        pdf.cell(42, 7, "Material", 1)
-        pdf.cell(23, 7, "Total Dia", 1)
-        pdf.cell(40, 7, "Notas", 1)
-        pdf.ln()
-
-        pdf.set_font("Helvetica", "", 7)
-        for _, r in df_p.iterrows():
-            el = f"{r['Elemento']} ({r['Dias Elemento']}d)" if r["Elemento"] else "-"
-            me = f"{r['Meio']} ({r['Dias Meio']}d)" if r["Meio"] else "-"
-            ma = f"{r['Material']} ({r['Qtd Material']})" if r["Material"] else "-"
-            data_fmt = r["Data_dt"].strftime("%d/%m/%Y") if pd.notna(r["Data_dt"]) else str(r["Data"])
-
-            pdf.cell(20, 6, data_fmt, 1)
-            pdf.cell(35, 6, el[:22].encode("latin-1", "replace").decode("latin-1"), 1)
-            pdf.cell(30, 6, me[:19].encode("latin-1", "replace").decode("latin-1"), 1)
-            pdf.cell(42, 6, ma[:26].encode("latin-1", "replace").decode("latin-1"), 1)
-            pdf.cell(23, 6, f"{r['Total do Dia']:,.2f} EUR", 1)
-            pdf.cell(40, 6, str(r["Notas"])[:25].encode("latin-1", "replace").decode("latin-1"), 1)
-            pdf.ln()
-
-        pdf.ln(3)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(0, 8, f"Total no Periodo Selecionado: {df_p['Total do Dia'].sum():,.2f} EUR", ln=True, align="R")
-        return bytes(pdf.output())
-
-    st.subheader("Exportar Relatório PDF da Obra")
-    todas_obras = df_obras["ID Obra"].tolist()
-    if todas_obras:
-        obra_pdf = st.selectbox("Obra", options=todas_obras, key="pdf_obra")
-        c_d1, c_d2 = st.columns(2)
-        d_ini = c_d1.date_input("De", value=date.today().replace(day=1), key="pdf_ini")
-        d_fim = c_d2.date_input("Até", value=date.today(), key="pdf_fim")
-
-        df_p = df_diario[df_diario["ID Obra"] == obra_pdf].copy()
-        df_p["Data_dt"] = parse_datas(df_p["Data"])
-        df_p = df_p[
-            df_p["Data_dt"].notna()
-            & (df_p["Data_dt"] >= pd.Timestamp(d_ini))
-            & (df_p["Data_dt"] <= pd.Timestamp(d_fim))
-        ]
-
-        if not df_p.empty:
-            info_o_pdf = df_obras[df_obras["ID Obra"] == obra_pdf].iloc[0]
-            pdf_bytes = gerar_pdf(df_p, info_o_pdf, d_ini, d_fim)
-            st.download_button(
-                label="📥 Descarregar PDF",
-                data=pdf_bytes,
-                file_name=f"Producao_{obra_pdf}_{d_ini}_{d_fim}.pdf",
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True,
-            )
-        else:
-            st.info("Sem registos para esta obra nas datas escolhidas.")
-    else:
-        st.info("Sem obras registadas.")
+    df_pt_all = df_diario[df_diario["Elemento"] != ""].copy()
+    df_pt_all["Data_dt"] = parse_datas(df_pt_all["Data"])
+    df_pt_all = df_pt_
