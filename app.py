@@ -6,7 +6,7 @@ import requests
 import json
 from fpdf import FPDF
 
-st.set_page_config(page_title="Gestão de Obras", page_icon="🏗️", layout="centered")
+st.set_page_config(page_title="Rede Móvel LSM", page_icon="🗼", layout="centered")
 st.session_state.setdefault("ciclo", 0)
 st.session_state.setdefault("aviso", "")
 st.session_state.setdefault("usr_nome", "")
@@ -169,7 +169,7 @@ def converter_datas(serie):
 # ECRÃ DE LOGIN IMEDIATO
 # ==========================================
 if not st.session_state["usr_nome"]:
-    st.title("🏗️ Gestão de Obras")
+    st.title("🗼 Rede Móvel LSM")
     st.subheader("🔐 Iniciar Sessão")
     with st.form("form_login"):
         u_in = st.text_input("Utilizador")
@@ -208,7 +208,7 @@ if not st.session_state["usr_nome"]:
 # CABEÇALHO E CARREGAMENTO DE DADOS
 # ==========================================
 ct1, ct2 = st.columns([3, 1])
-ct1.title("🏗️ Gestão de Obras")
+ct1.title("🗼 Rede Móvel LSM")
 if ct2.button(f"🚪 Sair ({st.session_state['usr_nome']})", use_container_width=True):
     st.session_state["usr_nome"] = ""
     st.session_state["usr_perfil"] = ""
@@ -491,8 +491,8 @@ elif aba == "👷 Presenças":
         pdf = FPDF(orientation="L", unit="mm", format="A4")
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 14)
-        tit = f"MAPA DE PRESENCAS - {MESES[mes_n].upper()} / {ano_n}" + (f" ({colab_f})" if colab_f != "Todos" else "")
-        pdf.cell(0, 8, txt_pdf(tit, 80), ln=True, align="C")
+        tit = f"REDE MOVEL LSM | MAPA DE PRESENCAS - {MESES[mes_n].upper()} / {ano_n}" + (f" ({colab_f})" if colab_f != "Todos" else "")
+        pdf.cell(0, 8, txt_pdf(tit, 95), ln=True, align="C")
         pdf.ln(2)
 
         pdf.set_font("Helvetica", "B", 8)
@@ -544,7 +544,7 @@ elif aba == "👷 Presenças":
         st.download_button(
             "📥 Descarregar Calendário de Presenças (PDF)",
             bytes_pdf(pdf),
-            file_name=f"Presencas_{mes_n:02d}_{ano_n}.pdf",
+            file_name=f"Presencas_LSM_{mes_n:02d}_{ano_n}.pdf",
             mime="application/pdf",
             type="primary",
             use_container_width=True
@@ -696,7 +696,7 @@ elif aba == "📄 PDF":
             pdf = FPDF()
             pdf.add_page()
             pdf.set_font("Helvetica", "B", 14)
-            pdf.cell(0, 10, "FOLHA DE PRODUCAO E CUSTOS DE OBRA", ln=True, align="C")
+            pdf.cell(0, 10, "REDE MOVEL LSM - PRODUCAO E CUSTOS DE OBRA", ln=True, align="C")
             pdf.set_font("Helvetica", "", 10)
             pdf.cell(0, 6, txt_pdf(f"{inf['ID Obra']} - {inf['Nome da Obra']} ({inf['Cliente']})", 75), ln=True, align="C")
             pdf.cell(0, 6, f"Periodo: {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}", ln=True, align="C")
@@ -720,7 +720,7 @@ elif aba == "📄 PDF":
                 pdf.cell(23, 6, f"{r['Total do Dia']:,.2f} EUR", 1)
                 pdf.cell(40, 6, txt_pdf(r["Notas"], 25), 1)
                 pdf.ln()
-            st.download_button("📥 Descarregar PDF", bytes_pdf(pdf), file_name=f"Producao_{ob_p}_{d_ini}_{d_fim}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+            st.download_button("📥 Descarregar PDF", bytes_pdf(pdf), file_name=f"Producao_LSM_{ob_p}_{d_ini}_{d_fim}.pdf", mime="application/pdf", type="primary", use_container_width=True)
         else:
             st.info("Sem registos nas datas escolhidas.")
     else:
