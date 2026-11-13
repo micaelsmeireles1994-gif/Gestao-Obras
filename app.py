@@ -19,6 +19,20 @@ MESES = {
     9: "09 - Setembro", 10: "10 - Outubro", 11: "11 - Novembro", 12: "12 - Dezembro"
 }
 
+ESTADOS_OBRA = ["Nova", "Execução", "Parcial", "Concluída"]
+
+def normalizar_estado(valor):
+    v = str(valor).strip().lower()
+    if v in ["execucao", "execuçao", "execução", "em curso", "em execucao", "em execução"]:
+        return "Execução"
+    if v in ["concluida", "concluída", "fechada", "terminada"]:
+        return "Concluída"
+    if v == "parcial":
+        return "Parcial"
+    if v == "nova" or v == "":
+        return "Nova"
+    return str(valor).strip()
+
 def obter_config_setor(setor_escolhido):
     if "Eletricidade" in setor_escolhido:
         return {
@@ -157,6 +171,7 @@ def recalcular_obras(url_script, df_o, df_d):
     o = df_o.copy()
     o["ID Obra"] = o["ID Obra"].fillna("").astype(str).str.strip()
     o["Nome da Obra"] = o["Nome da Obra"].fillna("").astype(str).str.strip()
+    o["Estado"] = o["Estado"].apply(normalizar_estado)
     sem_id = (o["ID Obra"] == "") & (o["Nome da Obra"] != "")
     if sem_id.any():
         o.loc[sem_id, "ID Obra"] = [f"OB-{idx+1:02d}" for idx in o[sem_id].index]
@@ -271,6 +286,7 @@ with st.spinner(f"A carregar dados ({st.session_state['setor']})..."):
 
 for col in ["ID Obra", "Nome da Obra", "Cliente", "Estado"]:
     df_obras[col] = df_obras[col].fillna("").astype(str).str.strip()
+df_obras["Estado"] = df_obras["Estado"].apply(normalizar_estado)
 sem_id_obra = (df_obras["ID Obra"] == "") & (df_obras["Nome da Obra"] != "")
 if sem_id_obra.any():
     df_obras.loc[sem_id_obra, "ID Obra"] = [f"OB-{i+1:02d}" for i in df_obras[sem_id_obra].index]
@@ -309,6 +325,7 @@ preco_meio = dict(zip(df_meios["Meio / Equipamento"], df_meios["Valor_Dia"]))
 preco_mat = dict(zip(df_mat["Material"], df_mat["Preco_Unitario"]))
 unid_mat = dict(zip(df_mat["Material"], df_mat["Unidade"]))
 nomes_obras = dict(zip(df_obras["ID Obra"], df_obras["Nome da Obra"]))
+estados_obras = dict(zip(df_obras["ID Obra"], df_obras["Estado"]))
 clientes = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
 
 if st.session_state["aviso"]:
@@ -329,7 +346,7 @@ st.divider()
 # ==========================================
 if aba == "📝 Diário":
     k = st.session_state["ciclo"]
-    obras_disp = df_obras[df_obras["Estado"].str.lower() != "concluída"]
+    obras_disp = df_obras[df_obras["Estado"] != "Concluída"]
     if obras_disp.empty:
         obras_disp = df_obras
 
@@ -339,7 +356,11 @@ if aba == "📝 Diário":
             obras_disp = obras_disp[obras_disp["Cliente"] == cli_f]
 
     ids_disp = obras_disp["ID Obra"].tolist()
-    obra_sel = st.selectbox("🏢 Obra", ids_disp, format_func=lambda x: f"{x} — {nomes_obras.get(x, '')}") if ids_disp else None
+    obra_sel = st.selectbox(
+        "🏢 Obra",
+        ids_disp,
+        format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]"
+    ) if ids_disp else None
     if not obra_sel:
         st.warning("Sem obras disponíveis.")
 
@@ -598,27 +619,39 @@ elif aba == "👷 Presenças":
         st.info(f"Sem presenças registadas em {MESES[mes_n]} de {ano_n}.")
 
 # ==========================================
-# 3. CONTAS (POR CLIENTE E POR OBRA)
+# 3. CONTAS (POR CLIENTE, ESTADO E OBRA)
 # ==========================================
 elif aba == "💰 Contas":
     st.subheader("💰 Contas e Orçamentos")
     obras_ct = df_obras.copy()
-    if clientes:
-        cli_c = st.selectbox("👤 Cliente", ["Todos"] + clientes, key="c_cli")
-        if cli_c != "Todos":
-            obras_ct = obras_ct[obras_ct["Cliente"] == cli_c]
-            adj_c = float(obras_ct["Valor Adjudicado"].sum())
-            gas_c = float(obras_ct["Total Gasto"].sum())
-            st.caption(f"Acumulado **{cli_c}** ({len(obras_ct)} obra(s))")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Adjudicado Cli.", f"{adj_c:,.2f} €")
-            c2.metric("Gasto Cli.", f"{gas_c:,.2f} €")
-            c3.metric("Saldo Cli.", f"{adj_c - gas_c:,.2f} €")
-            st.divider()
+
+    fc1, fc2 = st.columns(2)
+    cli_c = fc1.selectbox("👤 Cliente", ["Todos"] + clientes, key="c_cli") if clientes else "Todos"
+    est_c = fc2.multiselect("📌 Estado da Obra", ESTADOS_OBRA, default=ESTADOS_OBRA, key="c_est")
+
+    if cli_c != "Todos":
+        obras_ct = obras_ct[obras_ct["Cliente"] == cli_c]
+    if est_c:
+        obras_ct = obras_ct[obras_ct["Estado"].isin(est_c)]
+
+    if cli_c != "Todos" or len(est_c) < len(ESTADOS_OBRA):
+        adj_c = float(obras_ct["Valor Adjudicado"].sum())
+        gas_c = float(obras_ct["Total Gasto"].sum())
+        st.caption(f"Acumulado do filtro ({len(obras_ct)} obra(s))")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Adjudicado Filtro", f"{adj_c:,.2f} €")
+        c2.metric("Gasto Filtro", f"{gas_c:,.2f} €")
+        c3.metric("Saldo Filtro", f"{adj_c - gas_c:,.2f} €")
+        st.divider()
 
     ids_ct = obras_ct["ID Obra"].tolist()
     if ids_ct:
-        ob_c = st.selectbox("🏢 Obra", ids_ct, format_func=lambda x: f"{x} — {nomes_obras.get(x, '')}", key="c_ob")
+        ob_c = st.selectbox(
+            "🏢 Obra",
+            ids_ct,
+            format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]",
+            key="c_ob"
+        )
         info = df_obras[df_obras["ID Obra"] == ob_c].iloc[0]
         reg_ob = df_diario[df_diario["ID Obra"] == ob_c].copy()
 
@@ -635,7 +668,7 @@ elif aba == "💰 Contas":
         m3.metric("Saldo", f"{v_sal:,.2f} €")
 
         if v_adj > 0:
-            st.progress(min(g_tot / v_adj, 1.0), text=f"Orçamento consumido: {(g_tot / v_adj) * 100:.1f}%")
+            st.progress(min(g_tot / v_adj, 1.0), text=f"Orçamento consumido: {(g_tot / v_adj) * 100:.1f}% | Estado: {info['Estado']}")
             if v_sal < 0:
                 st.warning(f"⚠️ Orçamento ultrapassado em {abs(v_sal):,.2f} €")
 
@@ -674,7 +707,7 @@ elif aba == "💰 Contas":
             hide_index=True
         )
     else:
-        st.info("Sem obras registadas.")
+        st.info("Sem obras para os filtros selecionados.")
 
 # ==========================================
 # 4. TABELAS DE BASE DE DADOS E UTILIZADORES
@@ -693,7 +726,23 @@ elif aba == "⚙️ Tabelas":
     )
 
     st.subheader("🏢 Obras Atribuídas")
-    ed_o = st.data_editor(df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado"]], num_rows="dynamic", use_container_width=True, hide_index=True)
+    st.caption("Estados disponíveis: Nova, Execução, Parcial, Concluída.")
+    outros_est = [e for e in df_obras["Estado"].unique().tolist() if e and e not in ESTADOS_OBRA]
+    ed_o = st.data_editor(
+        df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado"]],
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Estado": st.column_config.SelectboxColumn(
+                "Estado",
+                options=ESTADOS_OBRA + outros_est,
+                default="Nova",
+                required=True
+            )
+        }
+    )
+
     st.subheader("👷 Colaboradores (Valor/Dia)")
     ed_e = st.data_editor(df_elem, num_rows="dynamic", use_container_width=True, hide_index=True)
     st.subheader("🚚 Viaturas / Meios (Valor/Dia)")
@@ -726,7 +775,11 @@ elif aba == "📄 PDF":
 
     ids_p = obras_p["ID Obra"].tolist()
     if ids_p:
-        ob_p = st.selectbox("🏢 Obra", ids_p, format_func=lambda x: f"{x} — {nomes_obras.get(x, '')}")
+        ob_p = st.selectbox(
+            "🏢 Obra",
+            ids_p,
+            format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]"
+        )
         bp = df_diario[df_diario["ID Obra"] == ob_p].copy()
         bp["Data_dt"] = converter_datas(bp["Data"])
         bp = bp[bp["Data_dt"].notna()].copy()
@@ -743,7 +796,7 @@ elif aba == "📄 PDF":
             pdf.set_font("Helvetica", "B", 14)
             pdf.cell(0, 10, f"{cfg['pdf_cab']} - PRODUCAO E CUSTOS DE OBRA", ln=True, align="C")
             pdf.set_font("Helvetica", "", 10)
-            pdf.cell(0, 6, txt_pdf(f"{inf['ID Obra']} - {inf['Nome da Obra']} ({inf['Cliente']})", 75), ln=True, align="C")
+            pdf.cell(0, 6, txt_pdf(f"{inf['ID Obra']} - {inf['Nome da Obra']} ({inf['Cliente']}) | Estado: {inf['Estado']}", 85), ln=True, align="C")
             pdf.cell(0, 6, f"Periodo: {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}", ln=True, align="C")
             pdf.ln(3)
             pdf.set_font("Helvetica", "B", 9)
