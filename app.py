@@ -6,17 +6,33 @@ import requests
 import json
 from fpdf import FPDF
 
-st.set_page_config(page_title="Rede Móvel LSM", page_icon="🗼", layout="centered")
+st.set_page_config(page_title="Gestão LSM", page_icon="🗼", layout="centered")
 st.session_state.setdefault("ciclo", 0)
 st.session_state.setdefault("aviso", "")
 st.session_state.setdefault("usr_nome", "")
 st.session_state.setdefault("usr_perfil", "")
+st.session_state.setdefault("setor", "🗼 Rede Móvel")
 
 MESES = {
     1: "01 - Janeiro", 2: "02 - Fevereiro", 3: "03 - Março", 4: "04 - Abril",
     5: "05 - Maio", 6: "06 - Junho", 7: "07 - Julho", 8: "08 - Agosto",
     9: "09 - Setembro", 10: "10 - Outubro", 11: "11 - Novembro", 12: "12 - Dezembro"
 }
+
+def obter_config_setor(setor_escolhido):
+    if "Eletricidade" in setor_escolhido:
+        return {
+            "titulo": "⚡ Eletricidade LSM",
+            "pdf_cab": "ELETRICIDADE LSM",
+            "pdf_tag": "Eletricidade_LSM",
+            "secret_key": "apps_script_url_eletricidade"
+        }
+    return {
+        "titulo": "🗼 Rede Móvel LSM",
+        "pdf_cab": "REDE MOVEL LSM",
+        "pdf_tag": "RedeMovel_LSM",
+        "secret_key": "apps_script_url"
+    }
 
 def txt_pdf(valor, limite=40):
     return str(valor)[:limite].encode("latin-1", "replace").decode("latin-1")
@@ -39,8 +55,8 @@ def ajustar_colunas(df, sinonimos):
     return df.rename(columns=trocas) if trocas else df
 
 @st.cache_data(ttl=15)
-def ler_servidor():
-    r = requests.get(st.secrets["apps_script_url"], timeout=15)
+def ler_servidor(url_script):
+    r = requests.get(url_script, timeout=15)
     r.raise_for_status()
     pacote = r.json()
 
@@ -114,18 +130,18 @@ def ler_servidor():
     )
     return obras, elem, users, meios, mat, diario
 
-def guardar_aba(aba, df):
+def guardar_aba(url_script, aba, df):
     limpo = df.fillna("")
     linhas = [limpo.columns.tolist()] + limpo.values.tolist()
     r = requests.post(
-        st.secrets["apps_script_url"],
+        url_script,
         data=json.dumps({"sheet": aba, "rows": linhas}),
         headers={"Content-Type": "text/plain;charset=utf-8"},
         timeout=20
     )
     r.raise_for_status()
 
-def guardar_elementos_e_users(df_e, df_u):
+def guardar_elementos_e_users(url_script, df_e, df_u):
     e_limpo = df_e[df_e["Elemento"].fillna("").astype(str).str.strip() != ""][["Elemento", "Valor_Dia"]].reset_index(drop=True)
     u_limpo = df_u[df_u["Utilizador"].fillna("").astype(str).str.strip() != ""][["Utilizador", "Senha", "Perfil"]].reset_index(drop=True)
     u_limpo["Perfil"] = u_limpo["Perfil"].fillna("").astype(str).str.strip()
@@ -135,9 +151,9 @@ def guardar_elementos_e_users(df_e, df_u):
     for col in ["Elemento", "Valor_Dia", "Utilizador", "Senha", "Perfil"]:
         if col not in combinado.columns:
             combinado[col] = ""
-    guardar_aba("Elementos", combinado[["Elemento", "Valor_Dia", "Utilizador", "Senha", "Perfil"]])
+    guardar_aba(url_script, "Elementos", combinado[["Elemento", "Valor_Dia", "Utilizador", "Senha", "Perfil"]])
 
-def recalcular_obras(df_o, df_d):
+def recalcular_obras(url_script, df_o, df_d):
     o = df_o.copy()
     o["ID Obra"] = o["ID Obra"].fillna("").astype(str).str.strip()
     o["Nome da Obra"] = o["Nome da Obra"].fillna("").astype(str).str.strip()
@@ -153,7 +169,7 @@ def recalcular_obras(df_o, df_d):
         gastos = d.groupby("ID Obra")["Total do Dia"].sum().to_dict()
     o["Total Gasto"] = o["ID Obra"].map(gastos).fillna(0.0)
     o["Saldo Restante"] = o["Valor Adjudicado"] - o["Total Gasto"]
-    guardar_aba("Obras", o)
+    guardar_aba(url_script, "Obras", o)
 
 def converter_datas(serie):
     s = serie.fillna("").astype(str).str.strip()
@@ -166,16 +182,33 @@ def converter_datas(serie):
     return res
 
 # ==========================================
-# ECRÃ DE LOGIN IMEDIATO
+# ECRÃ DE LOGIN COM ESCOLHA DE SETOR
 # ==========================================
 if not st.session_state["usr_nome"]:
-    st.title("🗼 Rede Móvel LSM")
+    setor_sel = st.radio(
+        "Escolher Setor",
+        ["🗼 Rede Móvel", "⚡ Eletricidade"],
+        index=0 if "Rede" in st.session_state["setor"] else 1,
+        horizontal=True
+    )
+    st.session_state["setor"] = setor_sel
+    cfg_login = obter_config_setor(setor_sel)
+
+    st.title(cfg_login["titulo"])
     st.subheader("🔐 Iniciar Sessão")
+
     with st.form("form_login"):
         u_in = st.text_input("Utilizador")
         s_in = st.text_input("Senha / PIN", type="password")
-        entrar = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+        entrar = st.form_submit_button(f"Entrar em {setor_sel}", type="primary", use_container_width=True)
+
     if entrar:
+        chave_sec = cfg_login["secret_key"]
+        if chave_sec not in st.secrets:
+            st.error(f"Falta adicionar '{chave_sec}' nos Secrets do Streamlit para ligar à base de dados de {setor_sel}.")
+            st.stop()
+
+        url_login = st.secrets[chave_sec]
         u_clean = u_in.strip().lower()
         s_clean = s_in.strip()
         if u_clean == "admin" and s_clean == "1234":
@@ -184,7 +217,7 @@ if not st.session_state["usr_nome"]:
             st.rerun()
         else:
             try:
-                _, _, df_u_login, _, _, _ = ler_servidor()
+                _, _, df_u_login, _, _, _ = ler_servidor(url_login)
                 for col in ["Utilizador", "Senha", "Perfil"]:
                     df_u_login[col] = df_u_login[col].fillna("").astype(str).str.strip()
                 df_u_login["Senha"] = df_u_login["Senha"].str.replace(r"\.0$", "", regex=True)
@@ -201,24 +234,36 @@ if not st.session_state["usr_nome"]:
                 else:
                     st.error("Utilizador ou senha incorretos.")
             except Exception as e:
-                st.error(f"Erro ao ligar à folha Google: {e}")
+                st.error(f"Erro ao ligar à folha Google ({setor_sel}): {e}")
     st.stop()
 
 # ==========================================
-# CABEÇALHO E CARREGAMENTO DE DADOS
+# CABEÇALHO E CARREGAMENTO DE DADOS DO SETOR ATIVO
 # ==========================================
+cfg = obter_config_setor(st.session_state["setor"])
+chave_ativa = cfg["secret_key"]
+
+if chave_ativa not in st.secrets:
+    st.error(f"Falta configurar '{chave_ativa}' nos Secrets do Streamlit.")
+    if st.button("⬅️ Voltar ao Login"):
+        st.session_state["usr_nome"] = ""
+        st.rerun()
+    st.stop()
+
+url_ativa = st.secrets[chave_ativa]
+
 ct1, ct2 = st.columns([3, 1])
-ct1.title("🗼 Rede Móvel LSM")
+ct1.title(cfg["titulo"])
 if ct2.button(f"🚪 Sair ({st.session_state['usr_nome']})", use_container_width=True):
     st.session_state["usr_nome"] = ""
     st.session_state["usr_perfil"] = ""
     st.rerun()
 
-with st.spinner("A carregar dados da obra..."):
+with st.spinner(f"A carregar dados ({st.session_state['setor']})..."):
     try:
-        df_obras, df_elem, df_users, df_meios, df_mat, df_diario = ler_servidor()
+        df_obras, df_elem, df_users, df_meios, df_mat, df_diario = ler_servidor(url_ativa)
     except Exception as erro:
-        st.error(f"Erro ao ligar à folha Google: {erro}")
+        st.error(f"Erro ao ligar à folha Google ({st.session_state['setor']}): {erro}")
         if st.button("🔄 Tentar novamente"):
             st.cache_data.clear()
             st.rerun()
@@ -275,7 +320,7 @@ is_admin = (st.session_state["usr_perfil"] == "Admin") or (st.session_state["usr
 if is_admin:
     aba = st.radio("Navegação", ["📝 Diário", "👷 Presenças", "💰 Contas", "⚙️ Tabelas", "📄 PDF"], horizontal=True, label_visibility="collapsed")
 else:
-    st.caption(f"👤 Sessão iniciada como **{st.session_state['usr_nome']}** (Perfil: Registo Diário)")
+    st.caption(f"👤 Sessão iniciada como **{st.session_state['usr_nome']}** ({st.session_state['setor']} — Registo Diário)")
     aba = "📝 Diário"
 st.divider()
 
@@ -356,8 +401,8 @@ if aba == "📝 Diário":
                     "Total do Dia": ce + cv + cm, "Notas": obs if i == 0 else ""
                 })
             atualizado = pd.concat([df_diario, pd.DataFrame(linhas_novas)], ignore_index=True)
-            guardar_aba("Registos_Diarios", atualizado)
-            recalcular_obras(df_obras, atualizado)
+            guardar_aba(url_ativa, "Registos_Diarios", atualizado)
+            recalcular_obras(url_ativa, df_obras, atualizado)
             st.cache_data.clear()
             st.session_state["ciclo"] += 1
             st.session_state["aviso"] = f"Gravado ({len(l_eq)} presença(s) registada(s))!"
@@ -381,8 +426,8 @@ if aba == "📝 Diário":
             ed["Custo Material"] = ed.apply(lambda r: preco_mat.get(str(r["Material"]), 0.0) * r["Qtd Material"], axis=1)
             ed["Total do Dia"] = ed["Custo Elemento"] + ed["Custo Meio"] + ed["Custo Material"]
             final = pd.concat([df_diario[df_diario["ID Obra"] != obra_sel], ed[df_diario.columns.tolist()]], ignore_index=True)
-            guardar_aba("Registos_Diarios", final)
-            recalcular_obras(df_obras, final)
+            guardar_aba(url_ativa, "Registos_Diarios", final)
+            recalcular_obras(url_ativa, df_obras, final)
             st.cache_data.clear()
             st.session_state["aviso"] = "Histórico atualizado!"
             st.rerun()
@@ -491,7 +536,7 @@ elif aba == "👷 Presenças":
         pdf = FPDF(orientation="L", unit="mm", format="A4")
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 14)
-        tit = f"REDE MOVEL LSM | MAPA DE PRESENCAS - {MESES[mes_n].upper()} / {ano_n}" + (f" ({colab_f})" if colab_f != "Todos" else "")
+        tit = f"{cfg['pdf_cab']} | MAPA DE PRESENCAS - {MESES[mes_n].upper()} / {ano_n}" + (f" ({colab_f})" if colab_f != "Todos" else "")
         pdf.cell(0, 8, txt_pdf(tit, 95), ln=True, align="C")
         pdf.ln(2)
 
@@ -544,7 +589,7 @@ elif aba == "👷 Presenças":
         st.download_button(
             "📥 Descarregar Calendário de Presenças (PDF)",
             bytes_pdf(pdf),
-            file_name=f"Presencas_LSM_{mes_n:02d}_{ano_n}.pdf",
+            file_name=f"Presencas_{cfg['pdf_tag']}_{mes_n:02d}_{ano_n}.pdf",
             mime="application/pdf",
             type="primary",
             use_container_width=True
@@ -660,10 +705,10 @@ elif aba == "⚙️ Tabelas":
         ed_o["Valor Adjudicado"] = pd.to_numeric(ed_o["Valor Adjudicado"], errors="coerce").fillna(0.0)
         ed_o["Total Gasto"] = 0.0
         ed_o["Saldo Restante"] = ed_o["Valor Adjudicado"]
-        recalcular_obras(ed_o, df_diario)
-        guardar_elementos_e_users(ed_e, ed_u)
-        guardar_aba("Meios", ed_v)
-        guardar_aba("Materiais", ed_m)
+        recalcular_obras(url_ativa, ed_o, df_diario)
+        guardar_elementos_e_users(url_ativa, ed_e, ed_u)
+        guardar_aba(url_ativa, "Meios", ed_v)
+        guardar_aba(url_ativa, "Materiais", ed_m)
         st.cache_data.clear()
         st.session_state["aviso"] = "Tabelas e utilizadores guardados!"
         st.rerun()
@@ -696,7 +741,7 @@ elif aba == "📄 PDF":
             pdf = FPDF()
             pdf.add_page()
             pdf.set_font("Helvetica", "B", 14)
-            pdf.cell(0, 10, "REDE MOVEL LSM - PRODUCAO E CUSTOS DE OBRA", ln=True, align="C")
+            pdf.cell(0, 10, f"{cfg['pdf_cab']} - PRODUCAO E CUSTOS DE OBRA", ln=True, align="C")
             pdf.set_font("Helvetica", "", 10)
             pdf.cell(0, 6, txt_pdf(f"{inf['ID Obra']} - {inf['Nome da Obra']} ({inf['Cliente']})", 75), ln=True, align="C")
             pdf.cell(0, 6, f"Periodo: {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}", ln=True, align="C")
@@ -720,7 +765,7 @@ elif aba == "📄 PDF":
                 pdf.cell(23, 6, f"{r['Total do Dia']:,.2f} EUR", 1)
                 pdf.cell(40, 6, txt_pdf(r["Notas"], 25), 1)
                 pdf.ln()
-            st.download_button("📥 Descarregar PDF", bytes_pdf(pdf), file_name=f"Producao_LSM_{ob_p}_{d_ini}_{d_fim}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+            st.download_button("📥 Descarregar PDF", bytes_pdf(pdf), file_name=f"Producao_{cfg['pdf_tag']}_{ob_p}_{d_ini}_{d_fim}.pdf", mime="application/pdf", type="primary", use_container_width=True)
         else:
             st.info("Sem registos nas datas escolhidas.")
     else:
