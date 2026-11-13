@@ -1,7 +1,9 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import calendar
 import base64
+import re
 from datetime import date
 import requests
 import json
@@ -21,6 +23,24 @@ MESES = {
 }
 
 ESTADOS_OBRA = ["Nova", "Execução", "Parcial", "Concluída"]
+
+def extrair_id_drive(url):
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", str(url))
+    return m.group(1) if m else ""
+
+def mostrar_consulta_pdf(obra_id, nome_obra, url_pdf):
+    url_limpo = str(url_pdf).strip()
+    if url_limpo.startswith("http"):
+        fid = extrair_id_drive(url_limpo)
+        st.markdown(f"**📎 Documento / Projeto da Obra ({obra_id})**")
+        b1, b2 = st.columns(2)
+        b1.link_button("📄 Abrir PDF noutra aba", url_limpo, type="primary", use_container_width=True)
+        if fid:
+            b2.link_button("📥 Descarregar PDF", f"https://drive.google.com/uc?export=download&id={fid}", use_container_width=True)
+            with st.expander("👁️ Consultar PDF diretamente aqui na aplicação"):
+                components.iframe(f"https://drive.google.com/file/d/{fid}/preview", height=520, scrolling=True)
+    else:
+        st.caption(f"ℹ️ A obra {obra_id} ({nome_obra}) não tem ficheiro PDF anexado.")
 
 def normalizar_estado(valor):
     v = str(valor).strip().lower()
@@ -313,6 +333,7 @@ with st.spinner(f"A carregar dados ({st.session_state['setor']})..."):
 
 for col in ["ID Obra", "Nome da Obra", "Cliente", "Estado", "PDF"]:
     df_obras[col] = df_obras[col].fillna("").astype(str).str.strip()
+df_obras["ID Obra"] = df_obras["ID Obra"].str.replace(r"\.0$", "", regex=True)
 df_obras["Estado"] = df_obras["Estado"].apply(normalizar_estado)
 sem_id_obra = (df_obras["ID Obra"] == "") & (df_obras["Nome da Obra"] != "")
 if sem_id_obra.any():
@@ -344,6 +365,7 @@ df_mat = df_mat[df_mat["Material"] != ""].copy()
 
 for col in ["Data", "ID Obra", "Elemento", "Meio", "Material", "Notas"]:
     df_diario[col] = df_diario[col].fillna("").astype(str).str.strip()
+df_diario["ID Obra"] = df_diario["ID Obra"].str.replace(r"\.0$", "", regex=True)
 for col in ["Dias Elemento", "Custo Elemento", "Dias Meio", "Custo Meio", "Qtd Material", "Custo Material", "Total do Dia"]:
     df_diario[col] = pd.to_numeric(df_diario[col], errors="coerce").fillna(0.0)
 
@@ -370,7 +392,7 @@ else:
 st.divider()
 
 # ==========================================
-# 1. DIÁRIO DE OBRA (SEM VALORES FINANCEIROS)
+# 1. DIÁRIO DE OBRA (COM CONSULTA PARA PERFIL DIÁRIO)
 # ==========================================
 if aba == "📝 Diário":
     k = st.session_state["ciclo"]
@@ -387,14 +409,14 @@ if aba == "📝 Diário":
     obra_sel = st.selectbox(
         "🏢 Obra",
         ids_disp,
-        format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]"
+        format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]" + (" 📎 PDF" if str(pdfs_obras.get(x, "")).startswith("http") else "")
     ) if ids_disp else None
+
     if not obra_sel:
         st.warning("Sem obras disponíveis.")
     else:
-        link_pdf_ob = pdfs_obras.get(obra_sel, "")
-        if link_pdf_ob.startswith("http"):
-            st.link_button(f"📄 Abrir Dossier / PDF da Obra ({obra_sel})", link_pdf_ob, use_container_width=True)
+        mostrar_consulta_pdf(obra_sel, nomes_obras.get(obra_sel, ""), pdfs_obras.get(obra_sel, ""))
+        st.divider()
 
     dt_reg = st.date_input("📅 Data", value=date.today())
 
@@ -461,29 +483,50 @@ if aba == "📝 Diário":
             st.session_state["aviso"] = f"Gravado ({len(l_eq)} presença(s) registada(s))!"
             st.rerun()
 
-    if obra_sel and is_admin:
+    if obra_sel:
         st.divider()
-        st.subheader("Histórico da Obra")
         h_obra = df_diario[df_diario["ID Obra"] == obra_sel].copy()
-        h_obra["Data"] = converter_datas(h_obra["Data"]).dt.strftime("%d/%m/%Y").fillna(h_obra["Data"])
+        h_obra["Data_dt"] = converter_datas(h_obra["Data"])
+        h_obra = h_obra.sort_values("Data_dt", ascending=False)
+        h_obra["Data"] = h_obra["Data_dt"].dt.strftime("%d/%m/%Y").fillna(h_obra["Data"])
         cols_h = ["ID_Registo", "Data", "Elemento", "Dias Elemento", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
-        ed_h = st.data_editor(h_obra[cols_h], num_rows="dynamic", use_container_width=True, hide_index=True, disabled=["ID_Registo"])
-        if st.button("Atualizar Histórico / Apagar Linhas", use_container_width=True):
-            ed = ed_h.copy()
-            ed["Data"] = converter_datas(ed["Data"]).dt.strftime("%Y-%m-%d").fillna(ed["Data"].astype(str))
-            ed["ID Obra"] = obra_sel
-            for cn in ["Dias Elemento", "Dias Meio", "Qtd Material"]:
-                ed[cn] = pd.to_numeric(ed[cn], errors="coerce").fillna(0.0)
-            ed["Custo Elemento"] = ed.apply(lambda r: preco_colab.get(str(r["Elemento"]), 0.0) * r["Dias Elemento"], axis=1)
-            ed["Custo Meio"] = ed.apply(lambda r: preco_meio.get(str(r["Meio"]), 0.0) * r["Dias Meio"], axis=1)
-            ed["Custo Material"] = ed.apply(lambda r: preco_mat.get(str(r["Material"]), 0.0) * r["Qtd Material"], axis=1)
-            ed["Total do Dia"] = ed["Custo Elemento"] + ed["Custo Meio"] + ed["Custo Material"]
-            final = pd.concat([df_diario[df_diario["ID Obra"] != obra_sel], ed[df_diario.columns.tolist()]], ignore_index=True)
-            guardar_aba(url_ativa, "Registos_Diarios", final)
-            recalcular_obras(url_ativa, df_obras, final)
-            st.cache_data.clear()
-            st.session_state["aviso"] = "Histórico atualizado!"
-            st.rerun()
+
+        if is_admin:
+            st.subheader("Histórico da Obra (Edição Admin)")
+            ed_h = st.data_editor(h_obra[cols_h], num_rows="dynamic", use_container_width=True, hide_index=True, disabled=["ID_Registo"])
+            if st.button("Atualizar Histórico / Apagar Linhas", use_container_width=True):
+                ed = ed_h.copy()
+                ed["Data"] = converter_datas(ed["Data"]).dt.strftime("%Y-%m-%d").fillna(ed["Data"].astype(str))
+                ed["ID Obra"] = obra_sel
+                for cn in ["Dias Elemento", "Dias Meio", "Qtd Material"]:
+                    ed[cn] = pd.to_numeric(ed[cn], errors="coerce").fillna(0.0)
+                ed["Custo Elemento"] = ed.apply(lambda r: preco_colab.get(str(r["Elemento"]), 0.0) * r["Dias Elemento"], axis=1)
+                ed["Custo Meio"] = ed.apply(lambda r: preco_meio.get(str(r["Meio"]), 0.0) * r["Dias Meio"], axis=1)
+                ed["Custo Material"] = ed.apply(lambda r: preco_mat.get(str(r["Material"]), 0.0) * r["Qtd Material"], axis=1)
+                ed["Total do Dia"] = ed["Custo Elemento"] + ed["Custo Meio"] + ed["Custo Material"]
+                final = pd.concat([df_diario[df_diario["ID Obra"] != obra_sel], ed[df_diario.columns.tolist()]], ignore_index=True)
+                guardar_aba(url_ativa, "Registos_Diarios", final)
+                recalcular_obras(url_ativa, df_obras, final)
+                st.cache_data.clear()
+                st.session_state["aviso"] = "Histórico atualizado!"
+                st.rerun()
+        else:
+            st.subheader("📋 Histórico da Obra (Apenas Consulta)")
+            if not h_obra.empty:
+                cols_consulta = ["Data", "Elemento", "Dias Elemento", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
+                st.dataframe(
+                    h_obra[cols_consulta].rename(columns={
+                        "Elemento": "Colaborador",
+                        "Dias Elemento": "Dias Col.",
+                        "Meio": "Viatura",
+                        "Dias Meio": "Dias Viat.",
+                        "Qtd Material": "Qtd"
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("Ainda não existem registos diários nesta obra.")
 
 # ==========================================
 # 2. PRESENÇAS (CALENDÁRIO + FINS DE SEMANA À PARTE)
@@ -681,12 +724,10 @@ elif aba == "💰 Contas":
         ob_c = st.selectbox(
             "🏢 Obra",
             ids_ct,
-            format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]",
+            format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]" + (" 📎 PDF" if str(pdfs_obras.get(x, "")).startswith("http") else ""),
             key="c_ob"
         )
-        link_pdf_ct = pdfs_obras.get(ob_c, "")
-        if link_pdf_ct.startswith("http"):
-            st.link_button(f"📄 Abrir Dossier / PDF da Obra ({ob_c})", link_pdf_ct, use_container_width=True)
+        mostrar_consulta_pdf(ob_c, nomes_obras.get(ob_c, ""), pdfs_obras.get(ob_c, ""))
 
         info = df_obras[df_obras["ID Obra"] == ob_c].iloc[0]
         reg_ob = df_diario[df_diario["ID Obra"] == ob_c].copy()
@@ -817,6 +858,7 @@ elif aba == "⚙️ Tabelas":
     ed_m = st.data_editor(df_mat, num_rows="dynamic", use_container_width=True, hide_index=True)
 
     if st.button("💾 Guardar Todas as Tabelas", type="primary", use_container_width=True):
+        ed_o["ID Obra"] = ed_o["ID Obra"].fillna("").astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
         ed_o["Valor Adjudicado"] = pd.to_numeric(ed_o["Valor Adjudicado"], errors="coerce").fillna(0.0)
         ed_o["Total Gasto"] = 0.0
         ed_o["Saldo Restante"] = ed_o["Valor Adjudicado"]
