@@ -122,6 +122,7 @@ custos_elem = dict(zip(df_elem["Elemento"], df_elem["Valor_Dia"]))
 custos_meios = dict(zip(df_meios["Meio / Equipamento"], df_meios["Valor_Dia"]))
 custos_mat = dict(zip(df_mat["Material"], df_mat["Preco_Unitario"]))
 unidades_mat = dict(zip(df_mat["Material"], df_mat["Unidade"]))
+clientes_disp = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
 
 st.title("🏗️ Gestão de Obras")
 if st.session_state["msg_sucesso"]:
@@ -136,13 +137,20 @@ st.divider()
 # ==========================================
 if secao == "📝 Diário":
     rid = st.session_state["reset_id"]
-    ativas = df_obras[df_obras["Estado"].str.lower() != "concluída"]["ID Obra"].tolist()
-    opcoes_obra = ativas if ativas else df_obras["ID Obra"].tolist()
+    df_o_reg = df_obras[df_obras["Estado"].str.lower() != "concluída"]
+    if df_o_reg.empty:
+        df_o_reg = df_obras
 
+    if clientes_disp:
+        cli_reg = st.selectbox("👤 Cliente", ["Todos"] + clientes_disp, key="reg_cli")
+        if cli_reg != "Todos":
+            df_o_reg = df_o_reg[df_o_reg["Cliente"] == cli_reg]
+
+    opcoes_obra = df_o_reg["ID Obra"].tolist()
     obra_reg = st.selectbox("🏢 Obra", opcoes_obra,
                             format_func=lambda x: f"{x} — {df_obras.loc[df_obras['ID Obra']==x, 'Nome da Obra'].values[0]}") if opcoes_obra else None
     if not obra_reg:
-        st.warning("Adiciona obras em ⚙️ Tabelas.")
+        st.warning("Sem obras disponíveis para este filtro.")
 
     data_reg = st.date_input("📅 Data", value=date.today())
 
@@ -282,15 +290,29 @@ elif secao == "👷 Presenças":
         st.info("Sem presenças registadas nas datas selecionadas.")
 
 # ==========================================
-# 3. CONTAS DA OBRA (ORÇAMENTO E TODOS OS GASTOS)
+# 3. CONTAS DA OBRA (POR CLIENTE E OBRA)
 # ==========================================
 elif secao == "💰 Contas":
-    st.subheader("💰 Contas por Obra")
-    obras_list = df_obras["ID Obra"].tolist()
+    st.subheader("💰 Contas")
+    df_o_ct = df_obras.copy()
+    if clientes_disp:
+        cli_ct = st.selectbox("👤 Cliente", ["Todos"] + clientes_disp, key="ct_cli")
+        if cli_ct != "Todos":
+            df_o_ct = df_o_ct[df_o_ct["Cliente"] == cli_ct]
+            tot_adj_cli = float(df_o_ct["Valor Adjudicado"].sum())
+            tot_gas_cli = float(df_o_ct["Total Gasto"].sum())
+            tot_sal_cli = tot_adj_cli - tot_gas_cli
+            st.caption(f"Resumo total **{cli_ct}** ({len(df_o_ct)} obra(s))")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Adjudicado Cli.", f"{tot_adj_cli:,.2f} €")
+            c2.metric("Gasto Cli.", f"{tot_gas_cli:,.2f} €")
+            c3.metric("Saldo Cli.", f"{tot_sal_cli:,.2f} €")
+            st.divider()
 
+    obras_list = df_o_ct["ID Obra"].tolist()
     if obras_list:
         obra_ct = st.selectbox(
-            "Selecionar Obra",
+            "🏢 Obra",
             obras_list,
             format_func=lambda x: f"{x} — {df_obras.loc[df_obras['ID Obra']==x, 'Nome da Obra'].values[0]}",
             key="ct_obra"
@@ -350,8 +372,8 @@ elif secao == "💰 Contas":
             st.info("Ainda não existem gastos registados nesta obra.")
 
         st.divider()
-        st.subheader("📊 Resumo Geral de Todas as Obras")
-        resumo_obras = df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado"]].rename(
+        st.subheader("📊 Quadro de Obras")
+        resumo_obras = df_o_ct[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado"]].rename(
             columns={
                 "Valor Adjudicado": "Valor Obra (€)",
                 "Total Gasto": "Gasto (€)",
@@ -393,9 +415,16 @@ elif secao == "⚙️ Tabelas":
 # ==========================================
 elif secao == "📄 PDF":
     st.subheader("Exportar Relatório PDF da Obra")
-    obras_list = df_obras["ID Obra"].tolist()
+    df_o_pdf = df_obras.copy()
+    if clientes_disp:
+        cli_pdf = st.selectbox("👤 Cliente", ["Todos"] + clientes_disp, key="pdf_cli")
+        if cli_pdf != "Todos":
+            df_o_pdf = df_o_pdf[df_o_pdf["Cliente"] == cli_pdf]
+
+    obras_list = df_o_pdf["ID Obra"].tolist()
     if obras_list:
-        obra_pdf = st.selectbox("Obra", obras_list)
+        obra_pdf = st.selectbox("🏢 Obra", obras_list,
+                                format_func=lambda x: f"{x} — {df_obras.loc[df_obras['ID Obra']==x, 'Nome da Obra'].values[0]}")
         bp = df_diario[df_diario["ID Obra"] == obra_pdf].copy()
         bp["Data_dt"] = parse_datas(bp["Data"])
         bp = bp[bp["Data_dt"].notna()].copy()
