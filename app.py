@@ -1,70 +1,98 @@
 import streamlit as st
 import pandas as pd
+import calendar
 from datetime import date
 import requests
 import json
 from fpdf import FPDF
 
 st.set_page_config(page_title="Gestão de Obras", page_icon="🏗️", layout="centered")
-st.session_state.setdefault("reset_id", 0)
-st.session_state.setdefault("msg_sucesso", "")
+st.session_state.setdefault("ciclo", 0)
+st.session_state.setdefault("aviso", "")
 
-def normalizar_colunas(df, aliases):
+MESES = {
+    1: "01 - Janeiro", 2: "02 - Fevereiro", 3: "03 - Março", 4: "04 - Abril",
+    5: "05 - Maio", 6: "06 - Junho", 7: "07 - Julho", 8: "08 - Agosto",
+    9: "09 - Setembro", 10: "10 - Outubro", 11: "11 - Novembro", 12: "12 - Dezembro"
+}
+
+def txt_pdf(valor, limite=40):
+    return str(valor)[:limite].encode("latin-1", "replace").decode("latin-1")
+
+def bytes_pdf(doc):
+    out = doc.output()
+    return out.encode("latin-1") if isinstance(out, str) else bytes(out)
+
+def ajustar_colunas(df, sinonimos):
     if df.empty:
         return df
-    cols_lower = {str(c).strip().lower(): c for c in df.columns}
-    renomear = {}
-    for dest, cands in aliases.items():
-        if dest not in df.columns:
-            for c in cands:
-                if c.lower() in cols_lower:
-                    renomear[cols_lower[c.lower()]] = dest
+    mapa = {str(c).strip().lower(): c for c in df.columns}
+    trocas = {}
+    for destino, opcoes in sinonimos.items():
+        if destino not in df.columns:
+            for op in opcoes:
+                if op.lower() in mapa:
+                    trocas[mapa[op.lower()]] = destino
                     break
-    return df.rename(columns=renomear) if renomear else df
+    return df.rename(columns=trocas) if trocas else df
 
 @st.cache_data(ttl=15)
-def carregar_dados():
-    resp = requests.get(st.secrets["apps_script_url"], timeout=20)
-    resp.raise_for_status()
-    dados = resp.json()
+def ler_servidor():
+    r = requests.get(st.secrets["apps_script_url"], timeout=20)
+    r.raise_for_status()
+    pacote = r.json()
 
-    def ler(nome, cols, aliases=None):
-        df = pd.DataFrame(dados.get(nome, []))
+    def extrair(aba, cols, sin=None):
+        df = pd.DataFrame(pacote.get(aba, []))
         if df.empty:
             return pd.DataFrame(columns=cols)
-        if aliases:
-            df = normalizar_colunas(df, aliases)
+        if sin:
+            df = ajustar_colunas(df, sin)
         for c in cols:
             if c not in df.columns:
                 df[c] = ""
         return df[cols]
 
-    obras = ler("Obras", ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado"],
-                {"ID Obra": ["ID", "Codigo", "Código"], "Nome da Obra": ["Obra", "Nome", "Designacao", "Designação"],
-                 "Valor Adjudicado": ["Valor", "Orcamento", "Orçamento", "Adjudicado"]})
-    elem = ler("Elementos", ["Elemento", "Valor_Dia"],
-               {"Elemento": ["Colaborador", "Colaboradores", "Nome", "Trabalhador"],
-                "Valor_Dia": ["Valor Dia", "Valor/Dia", "Custo_Dia", "Preco", "Preço", "Valor"]})
-    meios = ler("Meios", ["Meio / Equipamento", "Valor_Dia"],
-                {"Meio / Equipamento": ["Viatura", "Viaturas", "Meio", "Equipamento", "Matricula", "Matrícula"],
-                 "Valor_Dia": ["Valor Dia", "Valor/Dia", "Custo_Dia", "Preco", "Preço", "Valor"]})
-    mat = ler("Materiais", ["Material", "Unidade", "Preco_Unitario"],
-              {"Material": ["Nome", "Artigo", "Descricao", "Descrição"], "Unidade": ["Un", "Un."],
-               "Preco_Unitario": ["Preco Unitario", "Preço Unitário", "Preco", "Preço", "Valor"]})
-    diario = ler("Registos_Diarios", ["ID_Registo", "Data", "ID Obra", "Elemento", "Dias Elemento", "Custo Elemento",
-                                      "Meio", "Dias Meio", "Custo Meio", "Material", "Qtd Material", "Custo Material",
-                                      "Total do Dia", "Notas"],
-                 {"Elemento": ["Colaborador"], "Meio": ["Viatura"]})
+    obras = extrair(
+        "Obras",
+        ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado"],
+        {"ID Obra": ["ID", "Codigo", "Código"], "Nome da Obra": ["Obra", "Nome"], "Valor Adjudicado": ["Valor", "Orcamento", "Orçamento"]}
+    )
+    elem = extrair(
+        "Elementos",
+        ["Elemento", "Valor_Dia"],
+        {"Elemento": ["Colaborador", "Colaboradores", "Nome"], "Valor_Dia": ["Valor Dia", "Valor/Dia", "Custo_Dia", "Valor"]}
+    )
+    meios = extrair(
+        "Meios",
+        ["Meio / Equipamento", "Valor_Dia"],
+        {"Meio / Equipamento": ["Viatura", "Viaturas", "Meio", "Equipamento"], "Valor_Dia": ["Valor Dia", "Valor/Dia", "Valor"]}
+    )
+    mat = extrair(
+        "Materiais",
+        ["Material", "Unidade", "Preco_Unitario"],
+        {"Material": ["Nome", "Artigo"], "Unidade": ["Un", "Un."], "Preco_Unitario": ["Preco", "Preço", "Valor"]}
+    )
+    diario = extrair(
+        "Registos_Diarios",
+        ["ID_Registo", "Data", "ID Obra", "Elemento", "Dias Elemento", "Custo Elemento",
+         "Meio", "Dias Meio", "Custo Meio", "Material", "Qtd Material", "Custo Material", "Total do Dia", "Notas"],
+        {"Elemento": ["Colaborador"], "Meio": ["Viatura"]}
+    )
     return obras, elem, meios, mat, diario
 
-def gravar_aba(nome, df):
-    df_clean = df.fillna("")
-    rows = [df_clean.columns.tolist()] + df_clean.values.tolist()
-    r = requests.post(st.secrets["apps_script_url"], data=json.dumps({"sheet": nome, "rows": rows}),
-                      headers={"Content-Type": "text/plain;charset=utf-8"}, timeout=20)
+def guardar_aba(aba, df):
+    limpo = df.fillna("")
+    linhas = [limpo.columns.tolist()] + limpo.values.tolist()
+    r = requests.post(
+        st.secrets["apps_script_url"],
+        data=json.dumps({"sheet": aba, "rows": linhas}),
+        headers={"Content-Type": "text/plain;charset=utf-8"},
+        timeout=20
+    )
     r.raise_for_status()
 
-def atualizar_saldos(df_o, df_d):
+def recalcular_obras(df_o, df_d):
     o = df_o.copy()
     o["ID Obra"] = o["ID Obra"].fillna("").astype(str).str.strip()
     o["Valor Adjudicado"] = pd.to_numeric(o["Valor Adjudicado"], errors="coerce").fillna(0.0)
@@ -76,28 +104,28 @@ def atualizar_saldos(df_o, df_d):
         gastos = d.groupby("ID Obra")["Total do Dia"].sum().to_dict()
     o["Total Gasto"] = o["ID Obra"].map(gastos).fillna(0.0)
     o["Saldo Restante"] = o["Valor Adjudicado"] - o["Total Gasto"]
-    gravar_aba("Obras", o)
+    guardar_aba("Obras", o)
 
-def parse_datas(serie):
+def converter_datas(serie):
     s = serie.fillna("").astype(str).str.strip()
-    is_iso = s.str.match(r"^\d{4}-\d{2}-\d{2}")
+    iso = s.str.match(r"^\d{4}-\d{2}-\d{2}")
     res = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
-    if is_iso.any():
-        res.loc[is_iso] = pd.to_datetime(s[is_iso], format="mixed", errors="coerce", utc=True).dt.tz_localize(None).dt.round("D")
-    if (~is_iso).any():
-        res.loc[~is_iso] = pd.to_datetime(s[~is_iso], format="mixed", dayfirst=True, errors="coerce").dt.round("D")
+    if iso.any():
+        res.loc[iso] = pd.to_datetime(s[iso], format="mixed", errors="coerce", utc=True).dt.tz_localize(None).dt.round("D")
+    if (~iso).any():
+        res.loc[~iso] = pd.to_datetime(s[~iso], format="mixed", dayfirst=True, errors="coerce").dt.round("D")
     return res
 
 try:
-    df_obras, df_elem, df_meios, df_mat, df_diario = carregar_dados()
-except Exception as e:
-    st.error(f"Erro ao ligar à folha Google: {e}")
+    df_obras, df_elem, df_meios, df_mat, df_diario = ler_servidor()
+except Exception as erro:
+    st.error(f"Erro ao ligar à folha Google: {erro}")
     st.stop()
 
-for c in ["ID Obra", "Nome da Obra", "Cliente", "Estado"]:
-    df_obras[c] = df_obras[c].fillna("").astype(str).str.strip()
-for c in ["Valor Adjudicado", "Total Gasto", "Saldo Restante"]:
-    df_obras[c] = pd.to_numeric(df_obras[c], errors="coerce").fillna(0.0)
+for col in ["ID Obra", "Nome da Obra", "Cliente", "Estado"]:
+    df_obras[col] = df_obras[col].fillna("").astype(str).str.strip()
+for col in ["Valor Adjudicado", "Total Gasto", "Saldo Restante"]:
+    df_obras[col] = pd.to_numeric(df_obras[col], errors="coerce").fillna(0.0)
 df_obras = df_obras[df_obras["ID Obra"] != ""].copy()
 
 df_elem["Elemento"] = df_elem["Elemento"].fillna("").astype(str).str.strip()
@@ -108,363 +136,458 @@ df_meios["Meio / Equipamento"] = df_meios["Meio / Equipamento"].fillna("").astyp
 df_meios["Valor_Dia"] = pd.to_numeric(df_meios["Valor_Dia"], errors="coerce").fillna(0.0)
 df_meios = df_meios[df_meios["Meio / Equipamento"] != ""].copy()
 
-for c in ["Material", "Unidade"]:
-    df_mat[c] = df_mat[c].fillna("").astype(str).str.strip()
+for col in ["Material", "Unidade"]:
+    df_mat[col] = df_mat[col].fillna("").astype(str).str.strip()
 df_mat["Preco_Unitario"] = pd.to_numeric(df_mat["Preco_Unitario"], errors="coerce").fillna(0.0)
 df_mat = df_mat[df_mat["Material"] != ""].copy()
 
-for c in ["Data", "ID Obra", "Elemento", "Meio", "Material", "Notas"]:
-    df_diario[c] = df_diario[c].fillna("").astype(str).str.strip()
-for c in ["Dias Elemento", "Custo Elemento", "Dias Meio", "Custo Meio", "Qtd Material", "Custo Material", "Total do Dia"]:
-    df_diario[c] = pd.to_numeric(df_diario[c], errors="coerce").fillna(0.0)
+for col in ["Data", "ID Obra", "Elemento", "Meio", "Material", "Notas"]:
+    df_diario[col] = df_diario[col].fillna("").astype(str).str.strip()
+for col in ["Dias Elemento", "Custo Elemento", "Dias Meio", "Custo Meio", "Qtd Material", "Custo Material", "Total do Dia"]:
+    df_diario[col] = pd.to_numeric(df_diario[col], errors="coerce").fillna(0.0)
 
-custos_elem = dict(zip(df_elem["Elemento"], df_elem["Valor_Dia"]))
-custos_meios = dict(zip(df_meios["Meio / Equipamento"], df_meios["Valor_Dia"]))
-custos_mat = dict(zip(df_mat["Material"], df_mat["Preco_Unitario"]))
-unidades_mat = dict(zip(df_mat["Material"], df_mat["Unidade"]))
-clientes_disp = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
+preco_colab = dict(zip(df_elem["Elemento"], df_elem["Valor_Dia"]))
+preco_meio = dict(zip(df_meios["Meio / Equipamento"], df_meios["Valor_Dia"]))
+preco_mat = dict(zip(df_mat["Material"], df_mat["Preco_Unitario"]))
+unid_mat = dict(zip(df_mat["Material"], df_mat["Unidade"]))
+nomes_obras = dict(zip(df_obras["ID Obra"], df_obras["Nome da Obra"]))
+clientes = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
 
 st.title("🏗️ Gestão de Obras")
-if st.session_state["msg_sucesso"]:
-    st.success(st.session_state["msg_sucesso"])
-    st.session_state["msg_sucesso"] = ""
+if st.session_state["aviso"]:
+    st.success(st.session_state["aviso"])
+    st.session_state["aviso"] = ""
 
-secao = st.radio("Menu", ["📝 Diário", "👷 Presenças", "💰 Contas", "⚙️ Tabelas", "📄 PDF"], horizontal=True, label_visibility="collapsed")
+aba = st.radio("Navegação", ["📝 Diário", "👷 Presenças", "💰 Contas", "⚙️ Tabelas", "📄 PDF"], horizontal=True, label_visibility="collapsed")
 st.divider()
 
 # ==========================================
-# 1. REGISTO DIÁRIO (SEM VALORES VISÍVEIS)
+# 1. DIÁRIO DE OBRA (SEM VALORES FINANCEIROS)
 # ==========================================
-if secao == "📝 Diário":
-    rid = st.session_state["reset_id"]
-    df_o_reg = df_obras[df_obras["Estado"].str.lower() != "concluída"]
-    if df_o_reg.empty:
-        df_o_reg = df_obras
+if aba == "📝 Diário":
+    k = st.session_state["ciclo"]
+    obras_disp = df_obras[df_obras["Estado"].str.lower() != "concluída"]
+    if obras_disp.empty:
+        obras_disp = df_obras
 
-    if clientes_disp:
-        cli_reg = st.selectbox("👤 Cliente", ["Todos"] + clientes_disp, key="reg_cli")
-        if cli_reg != "Todos":
-            df_o_reg = df_o_reg[df_o_reg["Cliente"] == cli_reg]
+    if clientes:
+        cli_f = st.selectbox("👤 Cliente", ["Todos"] + clientes, key="d_cli")
+        if cli_f != "Todos":
+            obras_disp = obras_disp[obras_disp["Cliente"] == cli_f]
 
-    opcoes_obra = df_o_reg["ID Obra"].tolist()
-    obra_reg = st.selectbox("🏢 Obra", opcoes_obra,
-                            format_func=lambda x: f"{x} — {df_obras.loc[df_obras['ID Obra']==x, 'Nome da Obra'].values[0]}") if opcoes_obra else None
-    if not obra_reg:
-        st.warning("Sem obras disponíveis para este filtro.")
+    ids_disp = obras_disp["ID Obra"].tolist()
+    obra_sel = st.selectbox("🏢 Obra", ids_disp, format_func=lambda x: f"{x} — {nomes_obras.get(x, '')}") if ids_disp else None
+    if not obra_sel:
+        st.warning("Sem obras disponíveis.")
 
-    data_reg = st.date_input("📅 Data", value=date.today())
+    dt_reg = st.date_input("📅 Data", value=date.today())
 
-    colabs_sel = st.multiselect("👷 Colaboradores em Obra (regista presença)", list(custos_elem.keys()),
-                                placeholder="Selecionar colaboradores...", key=f"c_{rid}")
-    dias_colab = {}
-    for nome in colabs_sel:
+    eq_sel = st.multiselect("👷 Colaboradores em Obra (regista presença)", list(preco_colab.keys()), placeholder="Escolher colaboradores...", key=f"eq_{k}")
+    dias_eq = {}
+    for n in eq_sel:
         c1, c2 = st.columns([2, 1])
-        c1.markdown(f"**{nome}**")
-        dias_colab[nome] = c2.number_input("Dias", 0.0, value=1.0, step=0.5, label_visibility="collapsed", key=f"dc_{nome}_{rid}")
+        c1.markdown(f"**{n}**")
+        dias_eq[n] = c2.number_input("Dias", 0.0, value=1.0, step=0.5, label_visibility="collapsed", key=f"de_{n}_{k}")
 
-    meios_sel = st.multiselect("🚚 Viaturas / Meios", list(custos_meios.keys()),
-                               placeholder="Selecionar viaturas...", key=f"m_{rid}")
-    dias_meio = {}
-    for nome in meios_sel:
+    vi_sel = st.multiselect("🚚 Viaturas / Meios", list(preco_meio.keys()), placeholder="Escolher viaturas...", key=f"vi_{k}")
+    dias_vi = {}
+    for n in vi_sel:
         c1, c2 = st.columns([2, 1])
-        c1.markdown(f"**{nome}**")
-        dias_meio[nome] = c2.number_input("Dias", 0.0, value=1.0, step=0.5, label_visibility="collapsed", key=f"dm_{nome}_{rid}")
+        c1.markdown(f"**{n}**")
+        dias_vi[n] = c2.number_input("Dias", 0.0, value=1.0, step=0.5, label_visibility="collapsed", key=f"dv_{n}_{k}")
 
-    mats_sel = st.multiselect("📦 Material Aplicado", list(custos_mat.keys()),
-                              format_func=lambda m: f"{m} ({unidades_mat[m]})" if unidades_mat.get(m) else m,
-                              placeholder="Selecionar materiais...", key=f"mt_{rid}")
-    qtd_mat = {}
-    for nome in mats_sel:
+    mt_sel = st.multiselect(
+        "📦 Material Aplicado",
+        list(preco_mat.keys()),
+        format_func=lambda m: f"{m} ({unid_mat[m]})" if unid_mat.get(m) else m,
+        placeholder="Escolher materiais...",
+        key=f"mt_{k}"
+    )
+    qtd_mt = {}
+    for n in mt_sel:
         c1, c2 = st.columns([2, 1])
-        un = unidades_mat.get(nome, "")
-        c1.markdown(f"**{nome}** ({un})" if un else f"**{nome}**")
-        qtd_mat[nome] = c2.number_input("Qtd", 0.0, value=1.0, step=1.0, label_visibility="collapsed", key=f"qm_{nome}_{rid}")
+        u = unid_mat.get(n, "")
+        c1.markdown(f"**{n}** ({u})" if u else f"**{n}**")
+        qtd_mt[n] = c2.number_input("Qtd", 0.0, value=1.0, step=1.0, label_visibility="collapsed", key=f"qm_{n}_{k}")
 
-    notas = st.text_input("📝 Notas / Trabalhos realizados", key=f"nt_{rid}")
+    obs = st.text_input("📝 Notas / Trabalhos realizados", key=f"ob_{k}")
 
     if st.button("💾 Gravar Registo Diário", type="primary", use_container_width=True):
-        if not obra_reg:
+        if not obra_sel:
             st.error("Seleciona uma obra.")
-        elif not colabs_sel and not meios_sel and not mats_sel and not notas.strip():
+        elif not eq_sel and not vi_sel and not mt_sel and not obs.strip():
             st.error("Preenche pelo menos um campo.")
         else:
             max_id = pd.to_numeric(df_diario["ID_Registo"], errors="coerce").max()
-            prox_id = int(0 if pd.isna(max_id) else max_id) + 1
-            data_iso = data_reg.strftime("%Y-%m-%d")
-            lc = [(c, dias_colab[c]) for c in colabs_sel if dias_colab[c] > 0]
-            lm = [(m, dias_meio[m]) for m in meios_sel if dias_meio[m] > 0]
-            lt = [(mt, qtd_mat[mt]) for mt in mats_sel if qtd_mat[mt] > 0]
-            novas = []
-            for i in range(max(len(lc), len(lm), len(lt), 1)):
-                en, ed = lc[i] if i < len(lc) else ("", 0.0)
-                mn, md = lm[i] if i < len(lm) else ("", 0.0)
-                tn, tq = lt[i] if i < len(lt) else ("", 0.0)
-                ce, cm, ct = custos_elem.get(en, 0.0) * ed, custos_meios.get(mn, 0.0) * md, custos_mat.get(tn, 0.0) * tq
-                novas.append({"ID_Registo": prox_id + i, "Data": data_iso, "ID Obra": obra_reg,
-                              "Elemento": en, "Dias Elemento": ed, "Custo Elemento": ce,
-                              "Meio": mn, "Dias Meio": md, "Custo Meio": cm,
-                              "Material": tn, "Qtd Material": tq, "Custo Material": ct,
-                              "Total do Dia": ce + cm + ct, "Notas": notas if i == 0 else ""})
-            df_novo = pd.concat([df_diario, pd.DataFrame(novas)], ignore_index=True)
-            gravar_aba("Registos_Diarios", df_novo)
-            atualizar_saldos(df_obras, df_novo)
+            prox = int(0 if pd.isna(max_id) else max_id) + 1
+            dt_iso = dt_reg.strftime("%Y-%m-%d")
+            l_eq = [(c, dias_eq[c]) for c in eq_sel if dias_eq[c] > 0]
+            l_vi = [(v, dias_vi[v]) for v in vi_sel if dias_vi[v] > 0]
+            l_mt = [(m, qtd_mt[m]) for m in mt_sel if qtd_mt[m] > 0]
+            linhas_novas = []
+            for i in range(max(len(l_eq), len(l_vi), len(l_mt), 1)):
+                en, ed = l_eq[i] if i < len(l_eq) else ("", 0.0)
+                vn, vd = l_vi[i] if i < len(l_vi) else ("", 0.0)
+                mn, mq = l_mt[i] if i < len(l_mt) else ("", 0.0)
+                ce, cv, cm = preco_colab.get(en, 0.0) * ed, preco_meio.get(vn, 0.0) * vd, preco_mat.get(mn, 0.0) * mq
+                linhas_novas.append({
+                    "ID_Registo": prox + i, "Data": dt_iso, "ID Obra": obra_sel,
+                    "Elemento": en, "Dias Elemento": ed, "Custo Elemento": ce,
+                    "Meio": vn, "Dias Meio": vd, "Custo Meio": cv,
+                    "Material": mn, "Qtd Material": mq, "Custo Material": cm,
+                    "Total do Dia": ce + cv + cm, "Notas": obs if i == 0 else ""
+                })
+            atualizado = pd.concat([df_diario, pd.DataFrame(linhas_novas)], ignore_index=True)
+            guardar_aba("Registos_Diarios", atualizado)
+            recalcular_obras(df_obras, atualizado)
             st.cache_data.clear()
-            st.session_state["reset_id"] += 1
-            st.session_state["msg_sucesso"] = f"Gravado ({len(lc)} presença(s) registada(s))!"
+            st.session_state["ciclo"] += 1
+            st.session_state["aviso"] = f"Gravado ({len(l_eq)} presença(s) registada(s))!"
             st.rerun()
 
-    if obra_reg:
+    if obra_sel:
         st.divider()
         st.subheader("Histórico da Obra")
-        hist = df_diario[df_diario["ID Obra"] == obra_reg].copy()
-        hist["Data"] = parse_datas(hist["Data"]).dt.strftime("%d/%m/%Y").fillna(hist["Data"])
-        cols_v = ["ID_Registo", "Data", "Elemento", "Dias Elemento", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
-        ed_hist = st.data_editor(hist[cols_v], num_rows="dynamic", use_container_width=True, hide_index=True, disabled=["ID_Registo"])
+        h_obra = df_diario[df_diario["ID Obra"] == obra_sel].copy()
+        h_obra["Data"] = converter_datas(h_obra["Data"]).dt.strftime("%d/%m/%Y").fillna(h_obra["Data"])
+        cols_h = ["ID_Registo", "Data", "Elemento", "Dias Elemento", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
+        ed_h = st.data_editor(h_obra[cols_h], num_rows="dynamic", use_container_width=True, hide_index=True, disabled=["ID_Registo"])
         if st.button("Atualizar Histórico / Apagar Linhas", use_container_width=True):
-            ed = ed_hist.copy()
-            ed["Data"] = parse_datas(ed["Data"]).dt.strftime("%Y-%m-%d").fillna(ed["Data"].astype(str))
-            ed["ID Obra"] = obra_reg
-            for col_n in ["Dias Elemento", "Dias Meio", "Qtd Material"]:
-                ed[col_n] = pd.to_numeric(ed[col_n], errors="coerce").fillna(0.0)
-            ed["Custo Elemento"] = ed.apply(lambda r: custos_elem.get(str(r["Elemento"]), 0.0) * r["Dias Elemento"], axis=1)
-            ed["Custo Meio"] = ed.apply(lambda r: custos_meios.get(str(r["Meio"]), 0.0) * r["Dias Meio"], axis=1)
-            ed["Custo Material"] = ed.apply(lambda r: custos_mat.get(str(r["Material"]), 0.0) * r["Qtd Material"], axis=1)
+            ed = ed_h.copy()
+            ed["Data"] = converter_datas(ed["Data"]).dt.strftime("%Y-%m-%d").fillna(ed["Data"].astype(str))
+            ed["ID Obra"] = obra_sel
+            for cn in ["Dias Elemento", "Dias Meio", "Qtd Material"]:
+                ed[cn] = pd.to_numeric(ed[cn], errors="coerce").fillna(0.0)
+            ed["Custo Elemento"] = ed.apply(lambda r: preco_colab.get(str(r["Elemento"]), 0.0) * r["Dias Elemento"], axis=1)
+            ed["Custo Meio"] = ed.apply(lambda r: preco_meio.get(str(r["Meio"]), 0.0) * r["Dias Meio"], axis=1)
+            ed["Custo Material"] = ed.apply(lambda r: preco_mat.get(str(r["Material"]), 0.0) * r["Qtd Material"], axis=1)
             ed["Total do Dia"] = ed["Custo Elemento"] + ed["Custo Meio"] + ed["Custo Material"]
-            df_final = pd.concat([df_diario[df_diario["ID Obra"] != obra_reg], ed[df_diario.columns.tolist()]], ignore_index=True)
-            gravar_aba("Registos_Diarios", df_final)
-            atualizar_saldos(df_obras, df_final)
+            final = pd.concat([df_diario[df_diario["ID Obra"] != obra_sel], ed[df_diario.columns.tolist()]], ignore_index=True)
+            guardar_aba("Registos_Diarios", final)
+            recalcular_obras(df_obras, final)
             st.cache_data.clear()
-            st.session_state["msg_sucesso"] = "Histórico atualizado!"
+            st.session_state["aviso"] = "Histórico atualizado!"
             st.rerun()
 
 # ==========================================
-# 2. MAPA DE PRESENÇAS
+# 2. PRESENÇAS (CALENDÁRIO + FINS DE SEMANA À PARTE)
 # ==========================================
-elif secao == "👷 Presenças":
+elif aba == "👷 Presenças":
     st.subheader("👷 Mapa de Presenças")
-    base = df_diario[df_diario["Elemento"] != ""].copy()
-    base["Data_dt"] = parse_datas(base["Data"])
-    base = base[base["Data_dt"].notna()].copy()
+    base_pt = df_diario[df_diario["Elemento"] != ""].copy()
+    base_pt["Data_dt"] = converter_datas(base_pt["Data"])
+    base_pt = base_pt[base_pt["Data_dt"].notna()].copy()
 
-    fim_def = max(date.today(), base["Data_dt"].max().date()) if not base.empty else date.today()
-    c1, c2 = st.columns(2)
-    p_ini = c1.date_input("De", value=date.today().replace(day=1), key="p_ini")
-    p_fim = c2.date_input("Até", value=fim_def, key="p_fim")
+    hoje = date.today()
+    anos_pt = sorted(set([hoje.year - 1, hoje.year, hoje.year + 1] + (base_pt["Data_dt"].dt.year.tolist() if not base_pt.empty else [])))
+    lista_eq = sorted(set(list(preco_colab.keys()) + (base_pt["Elemento"].unique().tolist() if not base_pt.empty else [])))
 
-    filt = base[(base["Data_dt"] >= pd.Timestamp(p_ini)) & (base["Data_dt"] <= pd.Timestamp(p_fim))].sort_values(["Elemento", "Data_dt"])
-    colab_sel = st.selectbox("Colaborador", ["Todos"] + sorted(base["Elemento"].unique().tolist()))
-    if colab_sel != "Todos":
-        filt = filt[filt["Elemento"] == colab_sel]
+    c1, c2, c3 = st.columns([2, 1, 2])
+    mes_n = c1.selectbox("📅 Mês", list(MESES.keys()), index=hoje.month - 1, format_func=lambda m: MESES[m], key="pt_m")
+    ano_n = c2.selectbox("Ano", anos_pt, index=anos_pt.index(hoje.year), key="pt_a")
+    colab_f = c3.selectbox("👷 Colaborador", ["Todos"] + lista_eq, key="pt_c")
 
-    if not filt.empty:
-        filt["Data_Fmt"] = filt["Data_dt"].dt.strftime("%d/%m/%Y")
-        resumo = filt.groupby("Elemento", as_index=False).agg(
-            **{"Total Dias": ("Dias Elemento", "sum"), "Obras": ("ID Obra", lambda s: ", ".join(sorted(set(s.astype(str)))))}
+    flt = base_pt[(base_pt["Data_dt"].dt.year == ano_n) & (base_pt["Data_dt"].dt.month == mes_n)].copy()
+    if colab_f != "Todos":
+        flt = flt[flt["Elemento"] == colab_f]
+
+    flt["FDS"] = flt["Data_dt"].dt.dayofweek >= 5
+    flt["Uteis"] = flt["Dias Elemento"].where(~flt["FDS"], 0.0)
+    flt["SabDom"] = flt["Dias Elemento"].where(flt["FDS"], 0.0)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Dias Úteis (Seg–Sex)", f"{float(flt['Uteis'].sum()):.1f} d")
+    k2.metric("Fim de Semana (Sáb/Dom)", f"{float(flt['SabDom'].sum()):.1f} d")
+    k3.metric("Total Geral", f"{float(flt['Dias Elemento'].sum()):.1f} d")
+
+    if not flt.empty:
+        quadro_res = flt.groupby("Elemento", as_index=False).agg(
+            **{
+                "Dias Úteis": ("Uteis", "sum"),
+                "Sáb / Dom": ("SabDom", "sum"),
+                "Total Dias": ("Dias Elemento", "sum"),
+                "Obras": ("ID Obra", lambda s: ", ".join(sorted(set(s.astype(str)))))
+            }
         ).rename(columns={"Elemento": "Colaborador"})
-        st.dataframe(resumo, use_container_width=True, hide_index=True)
+        st.dataframe(quadro_res, use_container_width=True, hide_index=True)
 
-        st.markdown("**Registo dia a dia**")
-        st.dataframe(filt[["Data_Fmt", "Elemento", "ID Obra", "Dias Elemento", "Notas"]].rename(
-            columns={"Data_Fmt": "Data", "Elemento": "Colaborador", "Dias Elemento": "Dias"}), use_container_width=True, hide_index=True)
+    mapa_dia = {}
+    if not flt.empty:
+        ag = flt.groupby([flt["Data_dt"].dt.day, "Elemento", "ID Obra"], as_index=False)["Dias Elemento"].sum()
+        for _, r in ag.iterrows():
+            dn = int(r["Data_dt"])
+            tag = f"{r['Elemento']} ({r['Dias Elemento']:.1f}d)" if colab_f == "Todos" else f"{r['ID Obra']} ({r['Dias Elemento']:.1f}d)"
+            mapa_dia.setdefault(dn, []).append(tag)
 
-        pdf = FPDF()
+    semanas_mes = calendar.monthcalendar(ano_n, mes_n)
+    nomes_sem = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+    grelha = []
+    for sem in semanas_mes:
+        linha = {}
+        for idx, d in enumerate(sem):
+            if d == 0:
+                linha[nomes_sem[idx]] = ""
+            else:
+                itens = " • ".join(mapa_dia.get(d, []))
+                linha[nomes_sem[idx]] = f"Dia {d:02d}: {itens}" if itens else f"Dia {d:02d}"
+        grelha.append(linha)
+
+    df_calendario = pd.DataFrame(grelha, index=[f"Sem. {i}" for i in range(1, len(semanas_mes) + 1)])
+
+    def pintar_dia(v, fds):
+        if not v:
+            return "background-color: #f8fafc; color: #94a3b8;"
+        marcado = ":" in str(v)
+        if fds and marcado:
+            return "background-color: #fde68a; color: #78350f; font-weight: 700;"
+        if fds:
+            return "background-color: #fffbeb; color: #b45309;"
+        if marcado:
+            return "background-color: #dbeafe; color: #1e3a8a; font-weight: 700;"
+        return "color: #475569;"
+
+    est_cal = df_calendario.style
+    for cu in ["Seg", "Ter", "Qua", "Qui", "Sex"]:
+        est_cal = est_cal.map(lambda val: pintar_dia(val, False), subset=[cu])
+    for cf in ["Sáb", "Dom"]:
+        est_cal = est_cal.map(lambda val: pintar_dia(val, True), subset=[cf])
+
+    st.markdown(f"**🗓️ Calendário Mensal — {MESES[mes_n]} / {ano_n}**")
+    st.dataframe(est_cal, use_container_width=True)
+
+    if not flt.empty:
+        with st.expander("Ver lista detalhada por dia e notas"):
+            det = flt.sort_values(["Data_dt", "Elemento"]).copy()
+            det["Data"] = det["Data_dt"].dt.strftime("%d/%m/%Y")
+            det["Tipo"] = det["FDS"].map({True: "Fim de Semana", False: "Dia Útil"})
+            st.dataframe(
+                det[["Data", "Tipo", "Elemento", "ID Obra", "Dias Elemento", "Notas"]].rename(
+                    columns={"Elemento": "Colaborador", "Dias Elemento": "Dias"}
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
+
+        pdf = FPDF(orientation="L", unit="mm", format="A4")
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 14)
-        pdf.cell(0, 10, "MAPA DE PRESENCAS", ln=True, align="C")
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(0, 6, f"Periodo: {p_ini.strftime('%d/%m/%Y')} a {p_fim.strftime('%d/%m/%Y')}", ln=True, align="C")
-        pdf.ln(4)
-        pdf.set_font("Helvetica", "B", 9)
-        for txt, w in [("Colaborador", 75), ("Total Dias", 35), ("Obras", 80)]:
-            pdf.cell(w, 7, txt, 1)
+        tit = f"MAPA DE PRESENCAS - {MESES[mes_n].upper()} / {ano_n}" + (f" ({colab_f})" if colab_f != "Todos" else "")
+        pdf.cell(0, 8, txt_pdf(tit, 80), ln=True, align="C")
+        pdf.ln(2)
+
+        pdf.set_font("Helvetica", "B", 8)
+        for cab, larg, al in [("Colaborador", 75, "L"), ("Dias Uteis", 30, "C"), ("Sab / Dom", 35, "C"), ("Total Dias", 30, "C"), ("Obras", 107, "L")]:
+            pdf.cell(larg, 6, cab, 1, align=al)
         pdf.ln()
         pdf.set_font("Helvetica", "", 8)
-        for _, r in resumo.iterrows():
-            pdf.cell(75, 6, str(r["Colaborador"])[:40].encode("latin-1", "replace").decode("latin-1"), 1)
-            pdf.cell(35, 6, f"{r['Total Dias']:.1f}", 1, align="C")
-            pdf.cell(80, 6, str(r["Obras"])[:44].encode("latin-1", "replace").decode("latin-1"), 1)
+        for _, r in quadro_res.iterrows():
+            pdf.cell(75, 6, txt_pdf(r["Colaborador"], 38), 1)
+            pdf.cell(30, 6, f"{r['Dias Úteis']:.1f}", 1, align="C")
+            pdf.cell(35, 6, f"{r['Sáb / Dom']:.1f}", 1, align="C")
+            pdf.cell(30, 6, f"{r['Total Dias']:.1f}", 1, align="C")
+            pdf.cell(107, 6, txt_pdf(r["Obras"], 55), 1)
             pdf.ln()
-        st.download_button("📥 Descarregar Mapa de Presenças (PDF)", bytes(pdf.output()),
-                           file_name=f"Presencas_{p_ini}_{p_fim}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+
+        pdf.ln(4)
+        cab_sem = ["Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado (FDS)", "Domingo (FDS)"]
+        larg_c = 39.5
+        pdf.set_font("Helvetica", "B", 8)
+        for i, ds in enumerate(cab_sem):
+            pdf.set_fill_color(254, 243, 199) if i >= 5 else pdf.set_fill_color(241, 245, 249)
+            pdf.cell(larg_c, 6, ds, 1, align="C", fill=True)
+        pdf.ln()
+
+        alt_disp = max(90.0, 195.0 - pdf.get_y())
+        alt_lin = max(16.0, alt_disp / max(len(semanas_mes), 1))
+        for sem in semanas_mes:
+            x0, y0 = pdf.get_x(), pdf.get_y()
+            for i, d in enumerate(sem):
+                xc = x0 + i * larg_c
+                pdf.set_xy(xc, y0)
+                if d == 0:
+                    pdf.set_fill_color(248, 250, 252)
+                    pdf.cell(larg_c, alt_lin, "", 1, fill=True)
+                else:
+                    pdf.set_fill_color(255, 251, 235) if i >= 5 else pdf.set_fill_color(255, 255, 255)
+                    pdf.rect(xc, y0, larg_c, alt_lin, style="DF")
+                    pdf.set_xy(xc + 1.5, y0 + 1)
+                    pdf.set_font("Helvetica", "B", 8)
+                    pdf.cell(larg_c - 3, 4, str(d))
+                    itens_d = mapa_dia.get(d, [])
+                    if itens_d:
+                        pdf.set_xy(xc + 1.5, y0 + 5)
+                        pdf.set_font("Helvetica", "", 6.5)
+                        bloco = "\n".join(itens_d[:4]) + (f"\n+{len(itens_d)-4}..." if len(itens_d) > 4 else "")
+                        pdf.multi_cell(larg_c - 3, 3.1, txt_pdf(bloco, 140))
+            pdf.set_xy(x0, y0 + alt_lin)
+
+        st.download_button(
+            "📥 Descarregar Calendário de Presenças (PDF)",
+            bytes_pdf(pdf),
+            file_name=f"Presencas_{mes_n:02d}_{ano_n}.pdf",
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True
+        )
     else:
-        st.info("Sem presenças registadas nas datas selecionadas.")
+        st.info(f"Sem presenças registadas em {MESES[mes_n]} de {ano_n}.")
 
 # ==========================================
-# 3. CONTAS DA OBRA (POR CLIENTE E OBRA)
+# 3. CONTAS (POR CLIENTE E POR OBRA)
 # ==========================================
-elif secao == "💰 Contas":
-    st.subheader("💰 Contas")
-    df_o_ct = df_obras.copy()
-    if clientes_disp:
-        cli_ct = st.selectbox("👤 Cliente", ["Todos"] + clientes_disp, key="ct_cli")
-        if cli_ct != "Todos":
-            df_o_ct = df_o_ct[df_o_ct["Cliente"] == cli_ct]
-            tot_adj_cli = float(df_o_ct["Valor Adjudicado"].sum())
-            tot_gas_cli = float(df_o_ct["Total Gasto"].sum())
-            tot_sal_cli = tot_adj_cli - tot_gas_cli
-            st.caption(f"Resumo total **{cli_ct}** ({len(df_o_ct)} obra(s))")
+elif aba == "💰 Contas":
+    st.subheader("💰 Contas e Orçamentos")
+    obras_ct = df_obras.copy()
+    if clientes:
+        cli_c = st.selectbox("👤 Cliente", ["Todos"] + clientes, key="c_cli")
+        if cli_c != "Todos":
+            obras_ct = obras_ct[obras_ct["Cliente"] == cli_c]
+            adj_c = float(obras_ct["Valor Adjudicado"].sum())
+            gas_c = float(obras_ct["Total Gasto"].sum())
+            st.caption(f"Acumulado **{cli_c}** ({len(obras_ct)} obra(s))")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Adjudicado Cli.", f"{tot_adj_cli:,.2f} €")
-            c2.metric("Gasto Cli.", f"{tot_gas_cli:,.2f} €")
-            c3.metric("Saldo Cli.", f"{tot_sal_cli:,.2f} €")
+            c1.metric("Adjudicado Cli.", f"{adj_c:,.2f} €")
+            c2.metric("Gasto Cli.", f"{gas_c:,.2f} €")
+            c3.metric("Saldo Cli.", f"{adj_c - gas_c:,.2f} €")
             st.divider()
 
-    obras_list = df_o_ct["ID Obra"].tolist()
-    if obras_list:
-        obra_ct = st.selectbox(
-            "🏢 Obra",
-            obras_list,
-            format_func=lambda x: f"{x} — {df_obras.loc[df_obras['ID Obra']==x, 'Nome da Obra'].values[0]}",
-            key="ct_obra"
-        )
-        info_ct = df_obras[df_obras["ID Obra"] == obra_ct].iloc[0]
-        df_ct = df_diario[df_diario["ID Obra"] == obra_ct].copy()
+    ids_ct = obras_ct["ID Obra"].tolist()
+    if ids_ct:
+        ob_c = st.selectbox("🏢 Obra", ids_ct, format_func=lambda x: f"{x} — {nomes_obras.get(x, '')}", key="c_ob")
+        info = df_obras[df_obras["ID Obra"] == ob_c].iloc[0]
+        reg_ob = df_diario[df_diario["ID Obra"] == ob_c].copy()
 
-        adjudicado = float(info_ct["Valor Adjudicado"])
-        gasto_colab = float(df_ct["Custo Elemento"].sum())
-        gasto_viat = float(df_ct["Custo Meio"].sum())
-        gasto_mat = float(df_ct["Custo Material"].sum())
-        total_gasto = gasto_colab + gasto_viat + gasto_mat
-        saldo = adjudicado - total_gasto
+        v_adj = float(info["Valor Adjudicado"])
+        g_eq = float(reg_ob["Custo Elemento"].sum())
+        g_vi = float(reg_ob["Custo Meio"].sum())
+        g_mt = float(reg_ob["Custo Material"].sum())
+        g_tot = g_eq + g_vi + g_mt
+        v_sal = v_adj - g_tot
 
         m1, m2, m3 = st.columns(3)
-        m1.metric("Valor Obra", f"{adjudicado:,.2f} €")
-        m2.metric("Total Gasto", f"{total_gasto:,.2f} €")
-        m3.metric("Saldo", f"{saldo:,.2f} €")
+        m1.metric("Valor Obra", f"{v_adj:,.2f} €")
+        m2.metric("Total Gasto", f"{g_tot:,.2f} €")
+        m3.metric("Saldo", f"{v_sal:,.2f} €")
 
-        if adjudicado > 0:
-            pct = min(total_gasto / adjudicado, 1.0)
-            st.progress(pct, text=f"Orçamento consumido: {(total_gasto / adjudicado) * 100:.1f}%")
-            if saldo < 0:
-                st.warning(f"⚠️ Orçamento ultrapassado em {abs(saldo):,.2f} €")
+        if v_adj > 0:
+            st.progress(min(g_tot / v_adj, 1.0), text=f"Orçamento consumido: {(g_tot / v_adj) * 100:.1f}%")
+            if v_sal < 0:
+                st.warning(f"⚠️ Orçamento ultrapassado em {abs(v_sal):,.2f} €")
 
-        st.markdown("**Resumo de Gastos por Categoria**")
+        st.markdown("**Gastos por Categoria**")
         g1, g2, g3 = st.columns(3)
-        g1.metric("👷 Colaboradores", f"{gasto_colab:,.2f} €")
-        g2.metric("🚚 Viaturas", f"{gasto_viat:,.2f} €")
-        g3.metric("📦 Materiais", f"{gasto_mat:,.2f} €")
+        g1.metric("👷 Colaboradores", f"{g_eq:,.2f} €")
+        g2.metric("🚚 Viaturas", f"{g_vi:,.2f} €")
+        g3.metric("📦 Materiais", f"{g_mt:,.2f} €")
 
         st.divider()
-        st.markdown("**Detalhe de Todos os Gastos da Obra**")
-        if not df_ct.empty:
-            df_ct["Data_dt"] = parse_datas(df_ct["Data"])
-            df_ct = df_ct.sort_values("Data_dt", ascending=False)
-            df_ct["Data_Fmt"] = df_ct["Data_dt"].dt.strftime("%d/%m/%Y").fillna(df_ct["Data"])
-            tab_gastos = df_ct[[
-                "Data_Fmt", "Elemento", "Dias Elemento", "Custo Elemento",
-                "Meio", "Dias Meio", "Custo Meio",
-                "Material", "Qtd Material", "Custo Material",
-                "Total do Dia", "Notas"
-            ]].rename(columns={
-                "Data_Fmt": "Data",
-                "Elemento": "Colaborador",
-                "Dias Elemento": "Dias Col.",
-                "Custo Elemento": "€ Col.",
-                "Meio": "Viatura",
-                "Dias Meio": "Dias Viat.",
-                "Custo Meio": "€ Viat.",
-                "Qtd Material": "Qtd",
-                "Custo Material": "€ Mat.",
-                "Total do Dia": "Total (€)"
-            })
-            st.dataframe(tab_gastos, use_container_width=True, hide_index=True)
+        st.markdown("**Todos os Gastos da Obra**")
+        if not reg_ob.empty:
+            reg_ob["Data_dt"] = converter_datas(reg_ob["Data"])
+            reg_ob = reg_ob.sort_values("Data_dt", ascending=False)
+            reg_ob["Data"] = reg_ob["Data_dt"].dt.strftime("%d/%m/%Y").fillna(reg_ob["Data"])
+            cols_g = ["Data", "Elemento", "Dias Elemento", "Custo Elemento", "Meio", "Dias Meio", "Custo Meio", "Material", "Qtd Material", "Custo Material", "Total do Dia", "Notas"]
+            st.dataframe(
+                reg_ob[cols_g].rename(columns={
+                    "Elemento": "Colaborador", "Dias Elemento": "Dias Col.", "Custo Elemento": "€ Col.",
+                    "Meio": "Viatura", "Dias Meio": "Dias Viat.", "Custo Meio": "€ Viat.",
+                    "Qtd Material": "Qtd", "Custo Material": "€ Mat.", "Total do Dia": "Total (€)"
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
         else:
-            st.info("Ainda não existem gastos registados nesta obra.")
+            st.info("Sem gastos registados nesta obra.")
 
         st.divider()
-        st.subheader("📊 Quadro de Obras")
-        resumo_obras = df_o_ct[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado"]].rename(
-            columns={
-                "Valor Adjudicado": "Valor Obra (€)",
-                "Total Gasto": "Gasto (€)",
-                "Saldo Restante": "Saldo (€)"
-            }
+        st.subheader("📊 Quadro Geral de Obras")
+        st.dataframe(
+            obras_ct[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado"]].rename(
+                columns={"Valor Adjudicado": "Valor Obra (€)", "Total Gasto": "Gasto (€)", "Saldo Restante": "Saldo (€)"}
+            ),
+            use_container_width=True,
+            hide_index=True
         )
-        st.dataframe(resumo_obras, use_container_width=True, hide_index=True)
     else:
-        st.info("Sem obras registadas. Adiciona obras em ⚙️ Tabelas.")
+        st.info("Sem obras registadas.")
 
 # ==========================================
-# 4. TABELAS
+# 4. TABELAS DE BASE DE DADOS
 # ==========================================
-elif secao == "⚙️ Tabelas":
+elif aba == "⚙️ Tabelas":
     st.subheader("🏢 Obras Atribuídas")
-    ed_obras = st.data_editor(df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado"]],
-                              num_rows="dynamic", use_container_width=True, hide_index=True)
+    ed_o = st.data_editor(df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado"]], num_rows="dynamic", use_container_width=True, hide_index=True)
     st.subheader("👷 Colaboradores (Valor/Dia)")
-    ed_elem = st.data_editor(df_elem, num_rows="dynamic", use_container_width=True, hide_index=True)
+    ed_e = st.data_editor(df_elem, num_rows="dynamic", use_container_width=True, hide_index=True)
     st.subheader("🚚 Viaturas / Meios (Valor/Dia)")
-    ed_meios = st.data_editor(df_meios, num_rows="dynamic", use_container_width=True, hide_index=True)
+    ed_v = st.data_editor(df_meios, num_rows="dynamic", use_container_width=True, hide_index=True)
     st.subheader("📦 Materiais (Preço Unitário)")
-    ed_mat = st.data_editor(df_mat, num_rows="dynamic", use_container_width=True, hide_index=True)
+    ed_m = st.data_editor(df_mat, num_rows="dynamic", use_container_width=True, hide_index=True)
 
     if st.button("💾 Guardar Todas as Tabelas", type="primary", use_container_width=True):
-        ed_obras["Valor Adjudicado"] = pd.to_numeric(ed_obras["Valor Adjudicado"], errors="coerce").fillna(0.0)
-        ed_obras["Total Gasto"] = 0.0
-        ed_obras["Saldo Restante"] = ed_obras["Valor Adjudicado"]
-        atualizar_saldos(ed_obras, df_diario)
-        gravar_aba("Elementos", ed_elem)
-        gravar_aba("Meios", ed_meios)
-        gravar_aba("Materiais", ed_mat)
+        ed_o["Valor Adjudicado"] = pd.to_numeric(ed_o["Valor Adjudicado"], errors="coerce").fillna(0.0)
+        ed_o["Total Gasto"] = 0.0
+        ed_o["Saldo Restante"] = ed_o["Valor Adjudicado"]
+        recalcular_obras(ed_o, df_diario)
+        guardar_aba("Elementos", ed_e)
+        guardar_aba("Meios", ed_v)
+        guardar_aba("Materiais", ed_m)
         st.cache_data.clear()
-        st.session_state["msg_sucesso"] = "Tabelas guardadas!"
+        st.session_state["aviso"] = "Tabelas guardadas!"
         st.rerun()
 
 # ==========================================
-# 5. PDF DA OBRA
+# 5. EXPORTAR RELATÓRIO PDF DA OBRA
 # ==========================================
-elif secao == "📄 PDF":
-    st.subheader("Exportar Relatório PDF da Obra")
-    df_o_pdf = df_obras.copy()
-    if clientes_disp:
-        cli_pdf = st.selectbox("👤 Cliente", ["Todos"] + clientes_disp, key="pdf_cli")
-        if cli_pdf != "Todos":
-            df_o_pdf = df_o_pdf[df_o_pdf["Cliente"] == cli_pdf]
+elif aba == "📄 PDF":
+    st.subheader("📄 Relatório PDF da Obra")
+    obras_p = df_obras.copy()
+    if clientes:
+        cli_p = st.selectbox("👤 Cliente", ["Todos"] + clientes, key="p_cli")
+        if cli_p != "Todos":
+            obras_p = obras_p[obras_p["Cliente"] == cli_p]
 
-    obras_list = df_o_pdf["ID Obra"].tolist()
-    if obras_list:
-        obra_pdf = st.selectbox("🏢 Obra", obras_list,
-                                format_func=lambda x: f"{x} — {df_obras.loc[df_obras['ID Obra']==x, 'Nome da Obra'].values[0]}")
-        bp = df_diario[df_diario["ID Obra"] == obra_pdf].copy()
-        bp["Data_dt"] = parse_datas(bp["Data"])
+    ids_p = obras_p["ID Obra"].tolist()
+    if ids_p:
+        ob_p = st.selectbox("🏢 Obra", ids_p, format_func=lambda x: f"{x} — {nomes_obras.get(x, '')}")
+        bp = df_diario[df_diario["ID Obra"] == ob_p].copy()
+        bp["Data_dt"] = converter_datas(bp["Data"])
         bp = bp[bp["Data_dt"].notna()].copy()
-        fim_pdf = max(date.today(), bp["Data_dt"].max().date()) if not bp.empty else date.today()
+        fim_p = max(date.today(), bp["Data_dt"].max().date()) if not bp.empty else date.today()
         c1, c2 = st.columns(2)
-        d_ini = c1.date_input("De", value=date.today().replace(day=1), key="pdf_ini")
-        d_fim = c2.date_input("Até", value=fim_pdf, key="pdf_fim")
-        df_p = bp[(bp["Data_dt"] >= pd.Timestamp(d_ini)) & (bp["Data_dt"] <= pd.Timestamp(d_fim))]
+        d_ini = c1.date_input("De", value=date.today().replace(day=1), key="p_ini")
+        d_fim = c2.date_input("Até", value=fim_p, key="p_fim")
+        df_rel = bp[(bp["Data_dt"] >= pd.Timestamp(d_ini)) & (bp["Data_dt"] <= pd.Timestamp(d_fim))]
 
-        if not df_p.empty:
-            info = df_obras[df_obras["ID Obra"] == obra_pdf].iloc[0]
+        if not df_rel.empty:
+            inf = df_obras[df_obras["ID Obra"] == ob_p].iloc[0]
             pdf = FPDF()
             pdf.add_page()
             pdf.set_font("Helvetica", "B", 14)
             pdf.cell(0, 10, "FOLHA DE PRODUCAO E CUSTOS DE OBRA", ln=True, align="C")
             pdf.set_font("Helvetica", "", 10)
-            tit = f"{info['ID Obra']} - {info['Nome da Obra']} ({info['Cliente']})"
-            pdf.cell(0, 6, tit.encode("latin-1", "replace").decode("latin-1"), ln=True, align="C")
+            pdf.cell(0, 6, txt_pdf(f"{inf['ID Obra']} - {inf['Nome da Obra']} ({inf['Cliente']})", 75), ln=True, align="C")
             pdf.cell(0, 6, f"Periodo: {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}", ln=True, align="C")
             pdf.ln(3)
             pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(0, 7, f"Adjudicado: {info['Valor Adjudicado']:,.2f} EUR | Gasto: {info['Total Gasto']:,.2f} EUR | Saldo: {info['Saldo Restante']:,.2f} EUR", ln=True)
+            pdf.cell(0, 7, f"Adjudicado: {inf['Valor Adjudicado']:,.2f} EUR | Gasto: {inf['Total Gasto']:,.2f} EUR | Saldo: {inf['Saldo Restante']:,.2f} EUR", ln=True)
             pdf.ln(2)
             pdf.set_font("Helvetica", "B", 8)
-            for txt, w in [("Data", 20), ("Colaborador", 35), ("Viatura", 30), ("Material", 42), ("Total", 23), ("Notas", 40)]:
-                pdf.cell(w, 7, txt, 1)
+            for cab, larg in [("Data", 20), ("Colaborador", 35), ("Viatura", 30), ("Material", 42), ("Total", 23), ("Notas", 40)]:
+                pdf.cell(larg, 7, cab, 1)
             pdf.ln()
             pdf.set_font("Helvetica", "", 7)
-            for _, r in df_p.iterrows():
+            for _, r in df_rel.iterrows():
                 el = f"{r['Elemento']} ({r['Dias Elemento']}d)" if r["Elemento"] else "-"
                 me = f"{r['Meio']} ({r['Dias Meio']}d)" if r["Meio"] else "-"
                 ma = f"{r['Material']} ({r['Qtd Material']})" if r["Material"] else "-"
                 pdf.cell(20, 6, r["Data_dt"].strftime("%d/%m/%Y"), 1)
-                pdf.cell(35, 6, el[:22].encode("latin-1", "replace").decode("latin-1"), 1)
-                pdf.cell(30, 6, me[:19].encode("latin-1", "replace").decode("latin-1"), 1)
-                pdf.cell(42, 6, ma[:26].encode("latin-1", "replace").decode("latin-1"), 1)
+                pdf.cell(35, 6, txt_pdf(el, 22), 1)
+                pdf.cell(30, 6, txt_pdf(me, 19), 1)
+                pdf.cell(42, 6, txt_pdf(ma, 26), 1)
                 pdf.cell(23, 6, f"{r['Total do Dia']:,.2f} EUR", 1)
-                pdf.cell(40, 6, str(r["Notas"])[:25].encode("latin-1", "replace").decode("latin-1"), 1)
+                pdf.cell(40, 6, txt_pdf(r["Notas"], 25), 1)
                 pdf.ln()
-            st.download_button("📥 Descarregar PDF", bytes(pdf.output()),
-                               file_name=f"Producao_{obra_pdf}_{d_ini}_{d_fim}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+            st.download_button("📥 Descarregar PDF", bytes_pdf(pdf), file_name=f"Producao_{ob_p}_{d_ini}_{d_fim}.pdf", mime="application/pdf", type="primary", use_container_width=True)
         else:
             st.info("Sem registos nas datas escolhidas.")
