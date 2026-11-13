@@ -128,11 +128,11 @@ if st.session_state["msg_sucesso"]:
     st.success(st.session_state["msg_sucesso"])
     st.session_state["msg_sucesso"] = ""
 
-secao = st.radio("Menu", ["📝 Diário", "👷 Presenças", "⚙️ Tabelas", "📄 PDF"], horizontal=True, label_visibility="collapsed")
+secao = st.radio("Menu", ["📝 Diário", "👷 Presenças", "💰 Contas", "⚙️ Tabelas", "📄 PDF"], horizontal=True, label_visibility="collapsed")
 st.divider()
 
 # ==========================================
-# 1. REGISTO DIÁRIO
+# 1. REGISTO DIÁRIO (SEM VALORES VISÍVEIS)
 # ==========================================
 if secao == "📝 Diário":
     rid = st.session_state["reset_id"]
@@ -282,7 +282,88 @@ elif secao == "👷 Presenças":
         st.info("Sem presenças registadas nas datas selecionadas.")
 
 # ==========================================
-# 3. TABELAS
+# 3. CONTAS DA OBRA (ORÇAMENTO E TODOS OS GASTOS)
+# ==========================================
+elif secao == "💰 Contas":
+    st.subheader("💰 Contas por Obra")
+    obras_list = df_obras["ID Obra"].tolist()
+
+    if obras_list:
+        obra_ct = st.selectbox(
+            "Selecionar Obra",
+            obras_list,
+            format_func=lambda x: f"{x} — {df_obras.loc[df_obras['ID Obra']==x, 'Nome da Obra'].values[0]}",
+            key="ct_obra"
+        )
+        info_ct = df_obras[df_obras["ID Obra"] == obra_ct].iloc[0]
+        df_ct = df_diario[df_diario["ID Obra"] == obra_ct].copy()
+
+        adjudicado = float(info_ct["Valor Adjudicado"])
+        gasto_colab = float(df_ct["Custo Elemento"].sum())
+        gasto_viat = float(df_ct["Custo Meio"].sum())
+        gasto_mat = float(df_ct["Custo Material"].sum())
+        total_gasto = gasto_colab + gasto_viat + gasto_mat
+        saldo = adjudicado - total_gasto
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Valor Obra", f"{adjudicado:,.2f} €")
+        m2.metric("Total Gasto", f"{total_gasto:,.2f} €")
+        m3.metric("Saldo", f"{saldo:,.2f} €")
+
+        if adjudicado > 0:
+            pct = min(total_gasto / adjudicado, 1.0)
+            st.progress(pct, text=f"Orçamento consumido: {(total_gasto / adjudicado) * 100:.1f}%")
+            if saldo < 0:
+                st.warning(f"⚠️ Orçamento ultrapassado em {abs(saldo):,.2f} €")
+
+        st.markdown("**Resumo de Gastos por Categoria**")
+        g1, g2, g3 = st.columns(3)
+        g1.metric("👷 Colaboradores", f"{gasto_colab:,.2f} €")
+        g2.metric("🚚 Viaturas", f"{gasto_viat:,.2f} €")
+        g3.metric("📦 Materiais", f"{gasto_mat:,.2f} €")
+
+        st.divider()
+        st.markdown("**Detalhe de Todos os Gastos da Obra**")
+        if not df_ct.empty:
+            df_ct["Data_dt"] = parse_datas(df_ct["Data"])
+            df_ct = df_ct.sort_values("Data_dt", ascending=False)
+            df_ct["Data_Fmt"] = df_ct["Data_dt"].dt.strftime("%d/%m/%Y").fillna(df_ct["Data"])
+            tab_gastos = df_ct[[
+                "Data_Fmt", "Elemento", "Dias Elemento", "Custo Elemento",
+                "Meio", "Dias Meio", "Custo Meio",
+                "Material", "Qtd Material", "Custo Material",
+                "Total do Dia", "Notas"
+            ]].rename(columns={
+                "Data_Fmt": "Data",
+                "Elemento": "Colaborador",
+                "Dias Elemento": "Dias Col.",
+                "Custo Elemento": "€ Col.",
+                "Meio": "Viatura",
+                "Dias Meio": "Dias Viat.",
+                "Custo Meio": "€ Viat.",
+                "Qtd Material": "Qtd",
+                "Custo Material": "€ Mat.",
+                "Total do Dia": "Total (€)"
+            })
+            st.dataframe(tab_gastos, use_container_width=True, hide_index=True)
+        else:
+            st.info("Ainda não existem gastos registados nesta obra.")
+
+        st.divider()
+        st.subheader("📊 Resumo Geral de Todas as Obras")
+        resumo_obras = df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado"]].rename(
+            columns={
+                "Valor Adjudicado": "Valor Obra (€)",
+                "Total Gasto": "Gasto (€)",
+                "Saldo Restante": "Saldo (€)"
+            }
+        )
+        st.dataframe(resumo_obras, use_container_width=True, hide_index=True)
+    else:
+        st.info("Sem obras registadas. Adiciona obras em ⚙️ Tabelas.")
+
+# ==========================================
+# 4. TABELAS
 # ==========================================
 elif secao == "⚙️ Tabelas":
     st.subheader("🏢 Obras Atribuídas")
@@ -308,7 +389,7 @@ elif secao == "⚙️ Tabelas":
         st.rerun()
 
 # ==========================================
-# 4. PDF DA OBRA
+# 5. PDF DA OBRA
 # ==========================================
 elif secao == "📄 PDF":
     st.subheader("Exportar Relatório PDF da Obra")
