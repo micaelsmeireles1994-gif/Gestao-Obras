@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import calendar
+import base64
 from datetime import date
 import requests
 import json
@@ -74,16 +75,17 @@ def ler_servidor(url_script):
     r.raise_for_status()
     pacote = r.json()
 
-    def extrair(aba, cols, sin=None, pos_fallback=True):
+    def extrair(aba, cols, sin=None, pos_fallback=True, max_pos=None):
         df = pd.DataFrame(pacote.get(aba, []))
         if df.empty:
             return pd.DataFrame(columns=cols)
         if sin:
             df = ajustar_colunas(df, sin)
         cols_orig = list(df.columns)
+        limite_pos = len(cols) if max_pos is None else max_pos
         for i, c in enumerate(cols):
             if c not in df.columns:
-                if pos_fallback and i < len(cols_orig) and cols_orig[i] not in cols:
+                if pos_fallback and i < limite_pos and i < len(cols_orig) and cols_orig[i] not in cols:
                     df[c] = df[cols_orig[i]]
                 else:
                     df[c] = ""
@@ -91,13 +93,16 @@ def ler_servidor(url_script):
 
     obras = extrair(
         "Obras",
-        ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado"],
+        ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF"],
         {
             "ID Obra": ["ID", "Codigo", "Código", "Obra ID", "Ref"],
             "Nome da Obra": ["Obra", "Nome", "Designacao", "Designação", "Local"],
             "Cliente": ["Clientes", "Entidade"],
-            "Valor Adjudicado": ["Valor", "Orcamento", "Orçamento", "Adjudicado", "Valor Obra"]
-        }
+            "Valor Adjudicado": ["Valor", "Orcamento", "Orçamento", "Adjudicado", "Valor Obra"],
+            "PDF": ["Link PDF", "Ficheiro", "Projeto", "Anexo", "URL"]
+        },
+        pos_fallback=True,
+        max_pos=7
     )
     elem_raw = extrair(
         "Elementos",
@@ -151,9 +156,27 @@ def guardar_aba(url_script, aba, df):
         url_script,
         data=json.dumps({"sheet": aba, "rows": linhas}),
         headers={"Content-Type": "text/plain;charset=utf-8"},
-        timeout=20
+        timeout=25
     )
     r.raise_for_status()
+
+def enviar_pdf_drive(url_script, nome_fich, bytes_fich):
+    b64 = base64.b64encode(bytes_fich).decode("utf-8")
+    r = requests.post(
+        url_script,
+        data=json.dumps({
+            "action": "upload_pdf",
+            "filename": nome_fich,
+            "base64": b64
+        }),
+        headers={"Content-Type": "text/plain;charset=utf-8"},
+        timeout=45
+    )
+    r.raise_for_status()
+    resp = r.json()
+    if "url" not in resp:
+        raise ValueError(resp.get("error", "O Apps Script não devolveu o link do PDF. Confirma que atualizaste a implementação no Apps Script."))
+    return resp["url"]
 
 def guardar_elementos_e_users(url_script, df_e, df_u):
     e_limpo = df_e[df_e["Elemento"].fillna("").astype(str).str.strip() != ""][["Elemento", "Valor_Dia"]].reset_index(drop=True)
@@ -172,6 +195,9 @@ def recalcular_obras(url_script, df_o, df_d):
     o["ID Obra"] = o["ID Obra"].fillna("").astype(str).str.strip()
     o["Nome da Obra"] = o["Nome da Obra"].fillna("").astype(str).str.strip()
     o["Estado"] = o["Estado"].apply(normalizar_estado)
+    if "PDF" not in o.columns:
+        o["PDF"] = ""
+    o["PDF"] = o["PDF"].fillna("").astype(str).str.strip()
     sem_id = (o["ID Obra"] == "") & (o["Nome da Obra"] != "")
     if sem_id.any():
         o.loc[sem_id, "ID Obra"] = [f"OB-{idx+1:02d}" for idx in o[sem_id].index]
@@ -184,7 +210,8 @@ def recalcular_obras(url_script, df_o, df_d):
         gastos = d.groupby("ID Obra")["Total do Dia"].sum().to_dict()
     o["Total Gasto"] = o["ID Obra"].map(gastos).fillna(0.0)
     o["Saldo Restante"] = o["Valor Adjudicado"] - o["Total Gasto"]
-    guardar_aba(url_script, "Obras", o)
+    cols_ordem = ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF"]
+    guardar_aba(url_script, "Obras", o[cols_ordem])
 
 def converter_datas(serie):
     s = serie.fillna("").astype(str).str.strip()
@@ -284,7 +311,7 @@ with st.spinner(f"A carregar dados ({st.session_state['setor']})..."):
             st.rerun()
         st.stop()
 
-for col in ["ID Obra", "Nome da Obra", "Cliente", "Estado"]:
+for col in ["ID Obra", "Nome da Obra", "Cliente", "Estado", "PDF"]:
     df_obras[col] = df_obras[col].fillna("").astype(str).str.strip()
 df_obras["Estado"] = df_obras["Estado"].apply(normalizar_estado)
 sem_id_obra = (df_obras["ID Obra"] == "") & (df_obras["Nome da Obra"] != "")
@@ -326,6 +353,7 @@ preco_mat = dict(zip(df_mat["Material"], df_mat["Preco_Unitario"]))
 unid_mat = dict(zip(df_mat["Material"], df_mat["Unidade"]))
 nomes_obras = dict(zip(df_obras["ID Obra"], df_obras["Nome da Obra"]))
 estados_obras = dict(zip(df_obras["ID Obra"], df_obras["Estado"]))
+pdfs_obras = dict(zip(df_obras["ID Obra"], df_obras["PDF"]))
 clientes = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
 
 if st.session_state["aviso"]:
@@ -363,6 +391,10 @@ if aba == "📝 Diário":
     ) if ids_disp else None
     if not obra_sel:
         st.warning("Sem obras disponíveis.")
+    else:
+        link_pdf_ob = pdfs_obras.get(obra_sel, "")
+        if link_pdf_ob.startswith("http"):
+            st.link_button(f"📄 Abrir Dossier / PDF da Obra ({obra_sel})", link_pdf_ob, use_container_width=True)
 
     dt_reg = st.date_input("📅 Data", value=date.today())
 
@@ -652,6 +684,10 @@ elif aba == "💰 Contas":
             format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]",
             key="c_ob"
         )
+        link_pdf_ct = pdfs_obras.get(ob_c, "")
+        if link_pdf_ct.startswith("http"):
+            st.link_button(f"📄 Abrir Dossier / PDF da Obra ({ob_c})", link_pdf_ct, use_container_width=True)
+
         info = df_obras[df_obras["ID Obra"] == ob_c].iloc[0]
         reg_ob = df_diario[df_diario["ID Obra"] == ob_c].copy()
 
@@ -700,11 +736,12 @@ elif aba == "💰 Contas":
         st.divider()
         st.subheader("📊 Quadro Geral de Obras")
         st.dataframe(
-            obras_ct[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado"]].rename(
+            obras_ct[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF"]].rename(
                 columns={"Valor Adjudicado": "Valor Obra (€)", "Total Gasto": "Gasto (€)", "Saldo Restante": "Saldo (€)"}
             ),
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            column_config={"PDF": st.column_config.LinkColumn("PDF", display_text="📄 Abrir")}
         )
     else:
         st.info("Sem obras para os filtros selecionados.")
@@ -713,6 +750,34 @@ elif aba == "💰 Contas":
 # 4. TABELAS DE BASE DE DADOS E UTILIZADORES
 # ==========================================
 elif aba == "⚙️ Tabelas":
+    st.subheader("📎 Associar Ficheiro PDF a uma Obra")
+    ids_todas = df_obras["ID Obra"].tolist()
+    if ids_todas:
+        up1, up2 = st.columns([1, 1])
+        obra_up = up1.selectbox(
+            "Selecionar ID Obra",
+            ids_todas,
+            format_func=lambda x: f"{x} — {nomes_obras.get(x, '')}",
+            key="up_obra"
+        )
+        fich_pdf = up2.file_uploader("Escolher PDF", type=["pdf"], key="up_file")
+        if st.button("📤 Carregar PDF e Associar à Obra", use_container_width=True):
+            if not fich_pdf:
+                st.error("Escolhe um ficheiro PDF primeiro.")
+            else:
+                with st.spinner("A enviar PDF para o Google Drive e a associar à obra..."):
+                    try:
+                        nome_limpo = f"{obra_up}_{fich_pdf.name}"
+                        url_drive = enviar_pdf_drive(url_ativa, nome_limpo, fich_pdf.getvalue())
+                        df_obras.loc[df_obras["ID Obra"] == obra_up, "PDF"] = url_drive
+                        recalcular_obras(url_ativa, df_obras, df_diario)
+                        st.cache_data.clear()
+                        st.session_state["aviso"] = f"PDF associado com sucesso à obra {obra_up}!"
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao carregar PDF: {e}")
+    st.divider()
+
     st.subheader("🔐 Utilizadores e Acessos")
     st.caption("Perfil 'Admin' vê tudo | Perfil 'Diário' vê apenas o Registo Diário.")
     ed_u = st.data_editor(
@@ -729,7 +794,7 @@ elif aba == "⚙️ Tabelas":
     st.caption("Estados disponíveis: Nova, Execução, Parcial, Concluída.")
     outros_est = [e for e in df_obras["Estado"].unique().tolist() if e and e not in ESTADOS_OBRA]
     ed_o = st.data_editor(
-        df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado"]],
+        df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado", "PDF"]],
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
@@ -739,7 +804,8 @@ elif aba == "⚙️ Tabelas":
                 options=ESTADOS_OBRA + outros_est,
                 default="Nova",
                 required=True
-            )
+            ),
+            "PDF": st.column_config.LinkColumn("PDF", display_text="📄 Abrir PDF")
         }
     )
 
