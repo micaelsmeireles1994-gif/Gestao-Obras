@@ -18,38 +18,42 @@ st.session_state.setdefault("usr_perfil", "")
 st.session_state.setdefault("setor", "🗼 Rede Móvel")
 
 def aplicar_fundo_marca_agua():
-    for nome_img in ["fundo.jpg", "fundo.jpeg", "fundo.png"]:
-        if os.path.exists(nome_img):
-            with open(nome_img, "rb") as f:
-                b64_img = base64.b64encode(f.read()).decode("utf-8")
-            ext = "png" if nome_img.endswith(".png") else "jpeg"
-            st.markdown(
-                f"""
-                <style>
-                .stApp::before {{
-                    content: "";
-                    position: fixed;
-                    inset: 0;
-                    background-image: url("data:image/{ext};base64,{b64_img}");
-                    background-size: cover;
-                    background-position: center top;
-                    background-repeat: no-repeat;
-                    opacity: 0.18;
-                    pointer-events: none;
-                    z-index: 0;
-                }}
-                .stApp > header {{
-                    background-color: transparent !important;
-                }}
-                .main .block-container {{
-                    position: relative;
-                    z-index: 1;
-                }}
-                </style>
-                """,
-                unsafe_allow_html=True
-            )
+    img_path = None
+    preferidos = ["fundo.jpg", "fundo.jpeg", "fundo.png", "fundo.webp"]
+    ficheiros_pasta = os.listdir(".")
+    mapa_lower = {f.lower(): f for f in ficheiros_pasta if os.path.isfile(f)}
+    for p in preferidos:
+        if p in mapa_lower:
+            img_path = mapa_lower[p]
             break
+    if not img_path:
+        for f_low, f_real in mapa_lower.items():
+            if f_low.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                img_path = f_real
+                break
+
+    if img_path and os.path.exists(img_path):
+        with open(img_path, "rb") as f:
+            b64_img = base64.b64encode(f.read()).decode("utf-8")
+        ext = "png" if img_path.lower().endswith(".png") else "jpeg"
+        st.markdown(
+            f"""
+            <style>
+            .stApp, [data-testid="stAppViewContainer"] {{
+                background: linear-gradient(rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.82)),
+                            url("data:image/{ext};base64,{b64_img}") !important;
+                background-size: cover !important;
+                background-position: center top !important;
+                background-attachment: fixed !important;
+                background-repeat: no-repeat !important;
+            }}
+            [data-testid="stHeader"] {{
+                background: transparent !important;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
 
 aplicar_fundo_marca_agua()
 
@@ -895,6 +899,17 @@ elif aba == "💰 Contas":
 # 4. TABELAS DE BASE DE DADOS E UTILIZADORES
 # ==========================================
 elif aba == "⚙️ Tabelas":
+    with st.expander("🖼️ Configurar Imagem de Fundo (Marca de Água)", expanded=False):
+        fich_bg = st.file_uploader("Escolher imagem de fundo (LousaMaia)", type=["jpg", "jpeg", "png", "webp"], key="up_bg_app")
+        if st.button("💾 Aplicar Imagem de Fundo", use_container_width=True):
+            if not fich_bg:
+                st.error("Escolhe a imagem primeiro.")
+            else:
+                with open("fundo.jpg", "wb") as f_bg:
+                    f_bg.write(fich_bg.getvalue())
+                st.session_state["aviso"] = "Imagem de fundo aplicada!"
+                st.rerun()
+
     st.subheader("📎 Associar PDF ou Fotografias a uma Obra")
     ids_todas = df_obras["ID Obra"].tolist()
     if ids_todas:
