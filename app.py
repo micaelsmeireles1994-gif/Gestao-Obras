@@ -3,6 +3,7 @@ import streamlit.components.v1 as components
 import pandas as pd
 import calendar
 import base64
+import os
 import re
 from datetime import date
 import requests
@@ -15,6 +16,42 @@ st.session_state.setdefault("aviso", "")
 st.session_state.setdefault("usr_nome", "")
 st.session_state.setdefault("usr_perfil", "")
 st.session_state.setdefault("setor", "🗼 Rede Móvel")
+
+def aplicar_fundo_marca_agua():
+    for nome_img in ["fundo.jpg", "fundo.jpeg", "fundo.png"]:
+        if os.path.exists(nome_img):
+            with open(nome_img, "rb") as f:
+                b64_img = base64.b64encode(f.read()).decode("utf-8")
+            ext = "png" if nome_img.endswith(".png") else "jpeg"
+            st.markdown(
+                f"""
+                <style>
+                .stApp::before {{
+                    content: "";
+                    position: fixed;
+                    inset: 0;
+                    background-image: url("data:image/{ext};base64,{b64_img}");
+                    background-size: cover;
+                    background-position: center top;
+                    background-repeat: no-repeat;
+                    opacity: 0.18;
+                    pointer-events: none;
+                    z-index: 0;
+                }}
+                .stApp > header {{
+                    background-color: transparent !important;
+                }}
+                .main .block-container {{
+                    position: relative;
+                    z-index: 1;
+                }}
+                </style>
+                """,
+                unsafe_allow_html=True
+            )
+            break
+
+aplicar_fundo_marca_agua()
 
 MESES = {
     1: "01 - Janeiro", 2: "02 - Fevereiro", 3: "03 - Março", 4: "04 - Abril",
