@@ -28,8 +28,16 @@ def extrair_id_drive(url):
     m = re.search(r"/d/([a-zA-Z0-9_-]+)", str(url))
     return m.group(1) if m else ""
 
-def mostrar_consulta_pdf(obra_id, nome_obra, url_pdf):
+def separar_links_fotos(texto_fotos):
+    if not texto_fotos:
+        return []
+    partes = [p.strip() for p in str(texto_fotos).replace("\n", "|").split("|")]
+    return [p for p in partes if p.startswith("http")]
+
+def mostrar_anexos_obra(obra_id, nome_obra, url_pdf, texto_fotos):
     url_limpo = str(url_pdf).strip()
+    lista_fotos = separar_links_fotos(texto_fotos)
+
     if url_limpo.startswith("http"):
         fid = extrair_id_drive(url_limpo)
         st.markdown(f"**📎 Documento / Projeto da Obra ({obra_id})**")
@@ -41,6 +49,18 @@ def mostrar_consulta_pdf(obra_id, nome_obra, url_pdf):
                 components.iframe(f"https://drive.google.com/file/d/{fid}/preview", height=520, scrolling=True)
     else:
         st.caption(f"ℹ️ A obra {obra_id} ({nome_obra}) não tem ficheiro PDF anexado.")
+
+    if lista_fotos:
+        with st.expander(f"🖼️ Ver Fotografias da Obra ({len(lista_fotos)} foto(s))", expanded=False):
+            cols_f = st.columns(2)
+            for idx, link_f in enumerate(lista_fotos):
+                fid_f = extrair_id_drive(link_f)
+                with cols_f[idx % 2]:
+                    if fid_f:
+                        st.image(f"https://drive.google.com/thumbnail?id={fid_f}&sz=w800", caption=f"Foto {idx + 1}", use_container_width=True)
+                    st.link_button(f"🔍 Abrir Foto {idx + 1}", link_f, use_container_width=True)
+    else:
+        st.caption("📷 Sem fotografias associadas a esta obra.")
 
 def normalizar_estado(valor):
     v = str(valor).strip().lower()
@@ -113,13 +133,14 @@ def ler_servidor(url_script):
 
     obras = extrair(
         "Obras",
-        ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF"],
+        ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF", "Fotos"],
         {
             "ID Obra": ["ID", "Codigo", "Código", "Obra ID", "Ref"],
             "Nome da Obra": ["Obra", "Nome", "Designacao", "Designação", "Local"],
             "Cliente": ["Clientes", "Entidade"],
             "Valor Adjudicado": ["Valor", "Orcamento", "Orçamento", "Adjudicado", "Valor Obra"],
-            "PDF": ["Link PDF", "Ficheiro", "Projeto", "Anexo", "URL"]
+            "PDF": ["Link PDF", "Ficheiro", "Projeto", "Anexo", "URL"],
+            "Fotos": ["Foto", "Fotografias", "Imagens", "Links Fotos"]
         },
         pos_fallback=True,
         max_pos=7
@@ -180,13 +201,14 @@ def guardar_aba(url_script, aba, df):
     )
     r.raise_for_status()
 
-def enviar_pdf_drive(url_script, nome_fich, bytes_fich):
+def enviar_ficheiro_drive(url_script, nome_fich, bytes_fich, mime_type="application/pdf"):
     b64 = base64.b64encode(bytes_fich).decode("utf-8")
     r = requests.post(
         url_script,
         data=json.dumps({
             "action": "upload_pdf",
             "filename": nome_fich,
+            "mime": mime_type,
             "base64": b64
         }),
         headers={"Content-Type": "text/plain;charset=utf-8"},
@@ -195,8 +217,22 @@ def enviar_pdf_drive(url_script, nome_fich, bytes_fich):
     r.raise_for_status()
     resp = r.json()
     if "url" not in resp:
-        raise ValueError(resp.get("error", "O Apps Script não devolveu o link do PDF. Confirma que atualizaste a implementação no Apps Script."))
+        raise ValueError(resp.get("error", "O Apps Script não devolveu o link do ficheiro."))
     return resp["url"]
+
+def adicionar_fotos_obra(df_o, id_obra, lista_ficheiros, url_script):
+    atuais = []
+    if not df_o[df_o["ID Obra"] == id_obra].empty:
+        atuais = separar_links_fotos(df_o.loc[df_o["ID Obra"] == id_obra, "Fotos"].iloc[0])
+    novos = []
+    for f in lista_ficheiros:
+        mime = f.type if getattr(f, "type", "") else "image/jpeg"
+        nome_f = f"FOTO_{id_obra}_{f.name}"
+        url_f = enviar_ficheiro_drive(url_script, nome_f, f.getvalue(), mime_type=mime)
+        novos.append(url_f)
+    todos = atuais + novos
+    df_o.loc[df_o["ID Obra"] == id_obra, "Fotos"] = " | ".join(todos)
+    return len(novos)
 
 def guardar_elementos_e_users(url_script, df_e, df_u):
     e_limpo = df_e[df_e["Elemento"].fillna("").astype(str).str.strip() != ""][["Elemento", "Valor_Dia"]].reset_index(drop=True)
@@ -215,9 +251,10 @@ def recalcular_obras(url_script, df_o, df_d):
     o["ID Obra"] = o["ID Obra"].fillna("").astype(str).str.strip()
     o["Nome da Obra"] = o["Nome da Obra"].fillna("").astype(str).str.strip()
     o["Estado"] = o["Estado"].apply(normalizar_estado)
-    if "PDF" not in o.columns:
-        o["PDF"] = ""
-    o["PDF"] = o["PDF"].fillna("").astype(str).str.strip()
+    for col_extra in ["PDF", "Fotos"]:
+        if col_extra not in o.columns:
+            o[col_extra] = ""
+        o[col_extra] = o[col_extra].fillna("").astype(str).str.strip()
     sem_id = (o["ID Obra"] == "") & (o["Nome da Obra"] != "")
     if sem_id.any():
         o.loc[sem_id, "ID Obra"] = [f"OB-{idx+1:02d}" for idx in o[sem_id].index]
@@ -230,7 +267,7 @@ def recalcular_obras(url_script, df_o, df_d):
         gastos = d.groupby("ID Obra")["Total do Dia"].sum().to_dict()
     o["Total Gasto"] = o["ID Obra"].map(gastos).fillna(0.0)
     o["Saldo Restante"] = o["Valor Adjudicado"] - o["Total Gasto"]
-    cols_ordem = ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF"]
+    cols_ordem = ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF", "Fotos"]
     guardar_aba(url_script, "Obras", o[cols_ordem])
 
 def converter_datas(serie):
@@ -331,7 +368,7 @@ with st.spinner(f"A carregar dados ({st.session_state['setor']})..."):
             st.rerun()
         st.stop()
 
-for col in ["ID Obra", "Nome da Obra", "Cliente", "Estado", "PDF"]:
+for col in ["ID Obra", "Nome da Obra", "Cliente", "Estado", "PDF", "Fotos"]:
     df_obras[col] = df_obras[col].fillna("").astype(str).str.strip()
 df_obras["ID Obra"] = df_obras["ID Obra"].str.replace(r"\.0$", "", regex=True)
 df_obras["Estado"] = df_obras["Estado"].apply(normalizar_estado)
@@ -376,6 +413,7 @@ unid_mat = dict(zip(df_mat["Material"], df_mat["Unidade"]))
 nomes_obras = dict(zip(df_obras["ID Obra"], df_obras["Nome da Obra"]))
 estados_obras = dict(zip(df_obras["ID Obra"], df_obras["Estado"]))
 pdfs_obras = dict(zip(df_obras["ID Obra"], df_obras["PDF"]))
+fotos_obras = dict(zip(df_obras["ID Obra"], df_obras["Fotos"]))
 clientes = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
 
 if st.session_state["aviso"]:
@@ -391,8 +429,14 @@ else:
     aba = "📝 Diário"
 st.divider()
 
+def etiqueta_obra(x):
+    tag_pdf = " 📎PDF" if str(pdfs_obras.get(x, "")).startswith("http") else ""
+    qtd_f = len(separar_links_fotos(fotos_obras.get(x, "")))
+    tag_ft = f" 📷{qtd_f}" if qtd_f > 0 else ""
+    return f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]{tag_pdf}{tag_ft}"
+
 # ==========================================
-# 1. DIÁRIO DE OBRA (COM CONSULTA PARA PERFIL DIÁRIO)
+# 1. DIÁRIO DE OBRA (COM PDF + FOTOS + HISTÓRICO)
 # ==========================================
 if aba == "📝 Diário":
     k = st.session_state["ciclo"]
@@ -406,16 +450,17 @@ if aba == "📝 Diário":
             obras_disp = obras_disp[obras_disp["Cliente"] == cli_f]
 
     ids_disp = obras_disp["ID Obra"].tolist()
-    obra_sel = st.selectbox(
-        "🏢 Obra",
-        ids_disp,
-        format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]" + (" 📎 PDF" if str(pdfs_obras.get(x, "")).startswith("http") else "")
-    ) if ids_disp else None
+    obra_sel = st.selectbox("🏢 Obra", ids_disp, format_func=etiqueta_obra) if ids_disp else None
 
     if not obra_sel:
         st.warning("Sem obras disponíveis.")
     else:
-        mostrar_consulta_pdf(obra_sel, nomes_obras.get(obra_sel, ""), pdfs_obras.get(obra_sel, ""))
+        mostrar_anexos_obra(
+            obra_sel,
+            nomes_obras.get(obra_sel, ""),
+            pdfs_obras.get(obra_sel, ""),
+            fotos_obras.get(obra_sel, "")
+        )
         st.divider()
 
     dt_reg = st.date_input("📅 Data", value=date.today())
@@ -450,38 +495,60 @@ if aba == "📝 Diário":
 
     obs = st.text_input("📝 Notas / Trabalhos realizados", key=f"ob_{k}")
 
+    fotos_diario = st.file_uploader(
+        "📷 Anexar Fotografias da Obra (podes tirar foto ou escolher várias)",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        key=f"ft_d_{k}"
+    )
+
     if st.button("💾 Gravar Registo Diário", type="primary", use_container_width=True):
         if not obra_sel:
             st.error("Seleciona uma obra.")
-        elif not eq_sel and not vi_sel and not mt_sel and not obs.strip():
-            st.error("Preenche pelo menos um campo.")
+        elif not eq_sel and not vi_sel and not mt_sel and not obs.strip() and not fotos_diario:
+            st.error("Preenche pelo menos um campo ou adiciona uma fotografia.")
         else:
-            max_id = pd.to_numeric(df_diario["ID_Registo"], errors="coerce").max()
-            prox = int(0 if pd.isna(max_id) else max_id) + 1
-            dt_iso = dt_reg.strftime("%Y-%m-%d")
-            l_eq = [(c, dias_eq[c]) for c in eq_sel if dias_eq[c] > 0]
-            l_vi = [(v, dias_vi[v]) for v in vi_sel if dias_vi[v] > 0]
-            l_mt = [(m, qtd_mt[m]) for m in mt_sel if qtd_mt[m] > 0]
-            linhas_novas = []
-            for i in range(max(len(l_eq), len(l_vi), len(l_mt), 1)):
-                en, ed = l_eq[i] if i < len(l_eq) else ("", 0.0)
-                vn, vd = l_vi[i] if i < len(l_vi) else ("", 0.0)
-                mn, mq = l_mt[i] if i < len(l_mt) else ("", 0.0)
-                ce, cv, cm = preco_colab.get(en, 0.0) * ed, preco_meio.get(vn, 0.0) * vd, preco_mat.get(mn, 0.0) * mq
-                linhas_novas.append({
-                    "ID_Registo": prox + i, "Data": dt_iso, "ID Obra": obra_sel,
-                    "Elemento": en, "Dias Elemento": ed, "Custo Elemento": ce,
-                    "Meio": vn, "Dias Meio": vd, "Custo Meio": cv,
-                    "Material": mn, "Qtd Material": mq, "Custo Material": cm,
-                    "Total do Dia": ce + cv + cm, "Notas": obs if i == 0 else ""
-                })
-            atualizado = pd.concat([df_diario, pd.DataFrame(linhas_novas)], ignore_index=True)
-            guardar_aba(url_ativa, "Registos_Diarios", atualizado)
-            recalcular_obras(url_ativa, df_obras, atualizado)
-            st.cache_data.clear()
-            st.session_state["ciclo"] += 1
-            st.session_state["aviso"] = f"Gravado ({len(l_eq)} presença(s) registada(s))!"
-            st.rerun()
+            with st.spinner("A gravar registo e fotografias..."):
+                try:
+                    n_fotos = 0
+                    if fotos_diario:
+                        n_fotos = adicionar_fotos_obra(df_obras, obra_sel, fotos_diario, url_ativa)
+
+                    tem_dados_diario = bool(eq_sel or vi_sel or mt_sel or obs.strip())
+                    l_eq = [(c, dias_eq[c]) for c in eq_sel if dias_eq[c] > 0]
+                    l_vi = [(v, dias_vi[v]) for v in vi_sel if dias_vi[v] > 0]
+                    l_mt = [(m, qtd_mt[m]) for m in mt_sel if qtd_mt[m] > 0]
+
+                    if tem_dados_diario:
+                        max_id = pd.to_numeric(df_diario["ID_Registo"], errors="coerce").max()
+                        prox = int(0 if pd.isna(max_id) else max_id) + 1
+                        dt_iso = dt_reg.strftime("%Y-%m-%d")
+                        linhas_novas = []
+                        for i in range(max(len(l_eq), len(l_vi), len(l_mt), 1)):
+                            en, ed = l_eq[i] if i < len(l_eq) else ("", 0.0)
+                            vn, vd = l_vi[i] if i < len(l_vi) else ("", 0.0)
+                            mn, mq = l_mt[i] if i < len(l_mt) else ("", 0.0)
+                            ce, cv, cm = preco_colab.get(en, 0.0) * ed, preco_meio.get(vn, 0.0) * vd, preco_mat.get(mn, 0.0) * mq
+                            linhas_novas.append({
+                                "ID_Registo": prox + i, "Data": dt_iso, "ID Obra": obra_sel,
+                                "Elemento": en, "Dias Elemento": ed, "Custo Elemento": ce,
+                                "Meio": vn, "Dias Meio": vd, "Custo Meio": cv,
+                                "Material": mn, "Qtd Material": mq, "Custo Material": cm,
+                                "Total do Dia": ce + cv + cm, "Notas": obs if i == 0 else ""
+                            })
+                        atualizado = pd.concat([df_diario, pd.DataFrame(linhas_novas)], ignore_index=True)
+                        guardar_aba(url_ativa, "Registos_Diarios", atualizado)
+                    else:
+                        atualizado = df_diario
+
+                    recalcular_obras(url_ativa, df_obras, atualizado)
+                    st.cache_data.clear()
+                    st.session_state["ciclo"] += 1
+                    msg_ft = f" e {n_fotos} foto(s) guardada(s)" if n_fotos else ""
+                    st.session_state["aviso"] = f"Gravado ({len(l_eq)} presença(s){msg_ft})!"
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao gravar: {e}")
 
     if obra_sel:
         st.divider()
@@ -721,13 +788,13 @@ elif aba == "💰 Contas":
 
     ids_ct = obras_ct["ID Obra"].tolist()
     if ids_ct:
-        ob_c = st.selectbox(
-            "🏢 Obra",
-            ids_ct,
-            format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]" + (" 📎 PDF" if str(pdfs_obras.get(x, "")).startswith("http") else ""),
-            key="c_ob"
+        ob_c = st.selectbox("🏢 Obra", ids_ct, format_func=etiqueta_obra, key="c_ob")
+        mostrar_anexos_obra(
+            ob_c,
+            nomes_obras.get(ob_c, ""),
+            pdfs_obras.get(ob_c, ""),
+            fotos_obras.get(ob_c, "")
         )
-        mostrar_consulta_pdf(ob_c, nomes_obras.get(ob_c, ""), pdfs_obras.get(ob_c, ""))
 
         info = df_obras[df_obras["ID Obra"] == ob_c].iloc[0]
         reg_ob = df_diario[df_diario["ID Obra"] == ob_c].copy()
@@ -777,7 +844,7 @@ elif aba == "💰 Contas":
         st.divider()
         st.subheader("📊 Quadro Geral de Obras")
         st.dataframe(
-            obras_ct[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF"]].rename(
+            obras_ct[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF", "Fotos"]].rename(
                 columns={"Valor Adjudicado": "Valor Obra (€)", "Total Gasto": "Gasto (€)", "Saldo Restante": "Saldo (€)"}
             ),
             use_container_width=True,
@@ -791,32 +858,60 @@ elif aba == "💰 Contas":
 # 4. TABELAS DE BASE DE DADOS E UTILIZADORES
 # ==========================================
 elif aba == "⚙️ Tabelas":
-    st.subheader("📎 Associar Ficheiro PDF a uma Obra")
+    st.subheader("📎 Associar PDF ou Fotografias a uma Obra")
     ids_todas = df_obras["ID Obra"].tolist()
     if ids_todas:
-        up1, up2 = st.columns([1, 1])
-        obra_up = up1.selectbox(
-            "Selecionar ID Obra",
-            ids_todas,
-            format_func=lambda x: f"{x} — {nomes_obras.get(x, '')}",
-            key="up_obra"
-        )
-        fich_pdf = up2.file_uploader("Escolher PDF", type=["pdf"], key="up_file")
-        if st.button("📤 Carregar PDF e Associar à Obra", use_container_width=True):
-            if not fich_pdf:
-                st.error("Escolhe um ficheiro PDF primeiro.")
-            else:
-                with st.spinner("A enviar PDF para o Google Drive e a associar à obra..."):
-                    try:
-                        nome_limpo = f"{obra_up}_{fich_pdf.name}"
-                        url_drive = enviar_pdf_drive(url_ativa, nome_limpo, fich_pdf.getvalue())
-                        df_obras.loc[df_obras["ID Obra"] == obra_up, "PDF"] = url_drive
-                        recalcular_obras(url_ativa, df_obras, df_diario)
-                        st.cache_data.clear()
-                        st.session_state["aviso"] = f"PDF associado com sucesso à obra {obra_up}!"
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Erro ao carregar PDF: {e}")
+        obra_up = st.selectbox("Selecionar ID Obra", ids_todas, format_func=etiqueta_obra, key="up_obra")
+        col_pdf, col_ft = st.columns(2)
+
+        with col_pdf:
+            fich_pdf = st.file_uploader("📄 Escolher PDF da Obra", type=["pdf"], key="up_file_pdf")
+            if st.button("📤 Carregar PDF", use_container_width=True):
+                if not fich_pdf:
+                    st.error("Escolhe um ficheiro PDF primeiro.")
+                else:
+                    with st.spinner("A enviar PDF para o Google Drive..."):
+                        try:
+                            nome_limpo = f"{obra_up}_{fich_pdf.name}"
+                            url_drive = enviar_ficheiro_drive(url_ativa, nome_limpo, fich_pdf.getvalue(), mime_type="application/pdf")
+                            df_obras.loc[df_obras["ID Obra"] == obra_up, "PDF"] = url_drive
+                            recalcular_obras(url_ativa, df_obras, df_diario)
+                            st.cache_data.clear()
+                            st.session_state["aviso"] = f"PDF associado com sucesso à obra {obra_up}!"
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao carregar PDF: {e}")
+
+        with col_ft:
+            fichs_fotos = st.file_uploader(
+                "📷 Escolher Fotografias (podes selecionar várias)",
+                type=["jpg", "jpeg", "png", "webp"],
+                accept_multiple_files=True,
+                key="up_files_fotos"
+            )
+            if st.button("📷 Carregar Fotografias", use_container_width=True):
+                if not fichs_fotos:
+                    st.error("Escolhe pelo menos uma fotografia.")
+                else:
+                    with st.spinner("A enviar fotografias para o Google Drive..."):
+                        try:
+                            qtd_env = adicionar_fotos_obra(df_obras, obra_up, fichs_fotos, url_ativa)
+                            recalcular_obras(url_ativa, df_obras, df_diario)
+                            st.cache_data.clear()
+                            st.session_state["aviso"] = f"{qtd_env} fotografia(s) associada(s) à obra {obra_up}!"
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao carregar fotografias: {e}")
+
+            fotos_atuais_ob = separar_links_fotos(fotos_obras.get(obra_up, ""))
+            if fotos_atuais_ob:
+                if st.button(f"🗑️ Limpar as {len(fotos_atuais_ob)} foto(s) desta obra", use_container_width=True):
+                    df_obras.loc[df_obras["ID Obra"] == obra_up, "Fotos"] = ""
+                    recalcular_obras(url_ativa, df_obras, df_diario)
+                    st.cache_data.clear()
+                    st.session_state["aviso"] = f"Fotografias removidas da obra {obra_up}!"
+                    st.rerun()
+
     st.divider()
 
     st.subheader("🔐 Utilizadores e Acessos")
@@ -835,7 +930,7 @@ elif aba == "⚙️ Tabelas":
     st.caption("Estados disponíveis: Nova, Execução, Parcial, Concluída.")
     outros_est = [e for e in df_obras["Estado"].unique().tolist() if e and e not in ESTADOS_OBRA]
     ed_o = st.data_editor(
-        df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado", "PDF"]],
+        df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado", "PDF", "Fotos"]],
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
@@ -883,11 +978,7 @@ elif aba == "📄 PDF":
 
     ids_p = obras_p["ID Obra"].tolist()
     if ids_p:
-        ob_p = st.selectbox(
-            "🏢 Obra",
-            ids_p,
-            format_func=lambda x: f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]"
-        )
+        ob_p = st.selectbox("🏢 Obra", ids_p, format_func=etiqueta_obra)
         bp = df_diario[df_diario["ID Obra"] == ob_p].copy()
         bp["Data_dt"] = converter_datas(bp["Data"])
         bp = bp[bp["Data_dt"].notna()].copy()
