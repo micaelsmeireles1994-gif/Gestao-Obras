@@ -226,8 +226,10 @@ def ler_servidor(url_script):
     diario = extrair(
         "Registos_Diarios",
         ["ID_Registo", "Data", "ID Obra", "Elemento", "Dias Elemento", "Custo Elemento",
-         "Meio", "Dias Meio", "Custo Meio", "Material", "Qtd Material", "Custo Material", "Total do Dia", "Notas"],
-        {"Elemento": ["Colaborador"], "Meio": ["Viatura"]}
+         "Meio", "Dias Meio", "Custo Meio", "Material", "Qtd Material", "Custo Material", "Total do Dia", "Notas", "Dias Falta"],
+        {"Elemento": ["Colaborador"], "Meio": ["Viatura"], "Dias Falta": ["Faltas", "Falta"]},
+        pos_fallback=True,
+        max_pos=14
     )
     return obras, elem, users, meios, mat, diario
 
@@ -444,7 +446,7 @@ df_mat = df_mat[df_mat["Material"] != ""].copy()
 for col in ["Data", "ID Obra", "Elemento", "Meio", "Material", "Notas"]:
     df_diario[col] = df_diario[col].fillna("").astype(str).str.strip()
 df_diario["ID Obra"] = df_diario["ID Obra"].str.replace(r"\.0$", "", regex=True)
-for col in ["Dias Elemento", "Custo Elemento", "Dias Meio", "Custo Meio", "Qtd Material", "Custo Material", "Total do Dia"]:
+for col in ["Dias Elemento", "Custo Elemento", "Dias Meio", "Custo Meio", "Qtd Material", "Custo Material", "Total do Dia", "Dias Falta"]:
     df_diario[col] = pd.to_numeric(df_diario[col], errors="coerce").fillna(0.0)
 
 preco_colab = dict(zip(df_elem["Elemento"], df_elem["Valor_Dia"]))
@@ -455,7 +457,6 @@ nomes_obras = dict(zip(df_obras["ID Obra"], df_obras["Nome da Obra"]))
 estados_obras = dict(zip(df_obras["ID Obra"], df_obras["Estado"]))
 pdfs_obras = dict(zip(df_obras["ID Obra"], df_obras["PDF"]))
 fotos_obras = dict(zip(df_obras["ID Obra"], df_obras["Fotos"]))
-clientes = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
 
 if st.session_state["aviso"]:
     st.success(st.session_state["aviso"])
@@ -477,16 +478,15 @@ def etiqueta_obra(x):
     return f"{x} — {nomes_obras.get(x, '')} [{estados_obras.get(x, '')}]{tag_pdf}{tag_ft}"
 
 # ==========================================
-# 1. DIÁRIO DE OBRA (COM PDF + FOTOS + HISTÓRICO)
+# 1. DIÁRIO DE OBRA (SEM OBRAS CONCLUÍDAS + FALTAS)
 # ==========================================
 if aba == "📝 Diário":
     k = st.session_state["ciclo"]
-    obras_disp = df_obras[df_obras["Estado"] != "Concluída"]
-    if obras_disp.empty:
-        obras_disp = df_obras
+    obras_disp = df_obras[~df_obras["Estado"].str.lower().isin(["concluída", "concluida"])].copy()
+    clientes_ativos = sorted([c for c in obras_disp["Cliente"].unique().tolist() if c])
 
-    if clientes:
-        cli_f = st.selectbox("👤 Cliente", ["Todos"] + clientes, key="d_cli")
+    if clientes_ativos:
+        cli_f = st.selectbox("👤 Cliente", ["Todos"] + clientes_ativos, key="d_cli")
         if cli_f != "Todos":
             obras_disp = obras_disp[obras_disp["Cliente"] == cli_f]
 
@@ -494,7 +494,7 @@ if aba == "📝 Diário":
     obra_sel = st.selectbox("🏢 Obra", ids_disp, format_func=etiqueta_obra) if ids_disp else None
 
     if not obra_sel:
-        st.warning("Sem obras disponíveis.")
+        st.info("Sem obras ativas disponíveis no Diário (as obras concluídas estão ocultas).")
     else:
         mostrar_anexos_obra(
             obra_sel,
@@ -512,6 +512,15 @@ if aba == "📝 Diário":
         c1, c2 = st.columns([2, 1])
         c1.markdown(f"**{n}**")
         dias_eq[n] = c2.number_input("Dias", 0.0, value=1.0, step=0.5, label_visibility="collapsed", key=f"de_{n}_{k}")
+
+    ft_sel = st.multiselect("🚫 Faltas de Colaboradores (regista ausência)", list(preco_colab.keys()), placeholder="Escolher colaboradores em falta...", key=f"ft_col_{k}")
+    dias_ft = {}
+    motivo_ft = {}
+    for n in ft_sel:
+        c1, c2, c3 = st.columns([2, 1, 2])
+        c1.markdown(f"**{n}** *(Falta)*")
+        dias_ft[n] = c2.number_input("Dias Falta", 0.0, value=1.0, step=0.5, label_visibility="collapsed", key=f"df_{n}_{k}")
+        motivo_ft[n] = c3.text_input("Motivo", placeholder="Motivo (opcional)...", label_visibility="collapsed", key=f"mf_{n}_{k}")
 
     vi_sel = st.multiselect("🚚 Viaturas / Meios", list(preco_meio.keys()), placeholder="Escolher viaturas...", key=f"vi_{k}")
     dias_vi = {}
@@ -545,8 +554,8 @@ if aba == "📝 Diário":
 
     if st.button("💾 Gravar Registo Diário", type="primary", use_container_width=True):
         if not obra_sel:
-            st.error("Seleciona uma obra.")
-        elif not eq_sel and not vi_sel and not mt_sel and not obs.strip() and not fotos_diario:
+            st.error("Seleciona uma obra ativa.")
+        elif not eq_sel and not ft_sel and not vi_sel and not mt_sel and not obs.strip() and not fotos_diario:
             st.error("Preenche pelo menos um campo ou adiciona uma fotografia.")
         else:
             with st.spinner("A gravar registo e fotografias..."):
@@ -555,28 +564,46 @@ if aba == "📝 Diário":
                     if fotos_diario:
                         n_fotos = adicionar_fotos_obra(df_obras, obra_sel, fotos_diario, url_ativa)
 
-                    tem_dados_diario = bool(eq_sel or vi_sel or mt_sel or obs.strip())
                     l_eq = [(c, dias_eq[c]) for c in eq_sel if dias_eq[c] > 0]
+                    l_ft = [(c, dias_ft[c], motivo_ft[c].strip()) for c in ft_sel if dias_ft[c] > 0]
                     l_vi = [(v, dias_vi[v]) for v in vi_sel if dias_vi[v] > 0]
                     l_mt = [(m, qtd_mt[m]) for m in mt_sel if qtd_mt[m] > 0]
 
-                    if tem_dados_diario:
-                        max_id = pd.to_numeric(df_diario["ID_Registo"], errors="coerce").max()
-                        prox = int(0 if pd.isna(max_id) else max_id) + 1
-                        dt_iso = dt_reg.strftime("%Y-%m-%d")
-                        linhas_novas = []
+                    max_id = pd.to_numeric(df_diario["ID_Registo"], errors="coerce").max()
+                    prox = int(0 if pd.isna(max_id) else max_id) + 1
+                    dt_iso = dt_reg.strftime("%Y-%m-%d")
+                    linhas_novas = []
+
+                    tem_principal = bool(l_eq or l_vi or l_mt or obs.strip())
+                    if tem_principal:
                         for i in range(max(len(l_eq), len(l_vi), len(l_mt), 1)):
                             en, ed = l_eq[i] if i < len(l_eq) else ("", 0.0)
                             vn, vd = l_vi[i] if i < len(l_vi) else ("", 0.0)
                             mn, mq = l_mt[i] if i < len(l_mt) else ("", 0.0)
                             ce, cv, cm = preco_colab.get(en, 0.0) * ed, preco_meio.get(vn, 0.0) * vd, preco_mat.get(mn, 0.0) * mq
                             linhas_novas.append({
-                                "ID_Registo": prox + i, "Data": dt_iso, "ID Obra": obra_sel,
+                                "ID_Registo": prox, "Data": dt_iso, "ID Obra": obra_sel,
                                 "Elemento": en, "Dias Elemento": ed, "Custo Elemento": ce,
                                 "Meio": vn, "Dias Meio": vd, "Custo Meio": cv,
                                 "Material": mn, "Qtd Material": mq, "Custo Material": cm,
-                                "Total do Dia": ce + cv + cm, "Notas": obs if i == 0 else ""
+                                "Total do Dia": ce + cv + cm, "Notas": obs if i == 0 else "",
+                                "Dias Falta": 0.0
                             })
+                            prox += 1
+
+                    for fn, fd, fmot in l_ft:
+                        nota_f = f"FALTA ({fmot})" if fmot else "FALTA"
+                        linhas_novas.append({
+                            "ID_Registo": prox, "Data": dt_iso, "ID Obra": obra_sel,
+                            "Elemento": fn, "Dias Elemento": 0.0, "Custo Elemento": 0.0,
+                            "Meio": "", "Dias Meio": 0.0, "Custo Meio": 0.0,
+                            "Material": "", "Qtd Material": 0.0, "Custo Material": 0.0,
+                            "Total do Dia": 0.0, "Notas": nota_f,
+                            "Dias Falta": fd
+                        })
+                        prox += 1
+
+                    if linhas_novas:
                         atualizado = pd.concat([df_diario, pd.DataFrame(linhas_novas)], ignore_index=True)
                         guardar_aba(url_ativa, "Registos_Diarios", atualizado)
                     else:
@@ -585,8 +612,9 @@ if aba == "📝 Diário":
                     recalcular_obras(url_ativa, df_obras, atualizado)
                     st.cache_data.clear()
                     st.session_state["ciclo"] += 1
-                    msg_ft = f" e {n_fotos} foto(s) guardada(s)" if n_fotos else ""
-                    st.session_state["aviso"] = f"Gravado ({len(l_eq)} presença(s){msg_ft})!"
+                    msg_ft = f", {len(l_ft)} falta(s)" if l_ft else ""
+                    msg_foto = f" e {n_fotos} foto(s)" if n_fotos else ""
+                    st.session_state["aviso"] = f"Gravado ({len(l_eq)} presença(s){msg_ft}{msg_foto})!"
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao gravar: {e}")
@@ -597,7 +625,7 @@ if aba == "📝 Diário":
         h_obra["Data_dt"] = converter_datas(h_obra["Data"])
         h_obra = h_obra.sort_values("Data_dt", ascending=False)
         h_obra["Data"] = h_obra["Data_dt"].dt.strftime("%d/%m/%Y").fillna(h_obra["Data"])
-        cols_h = ["ID_Registo", "Data", "Elemento", "Dias Elemento", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
+        cols_h = ["ID_Registo", "Data", "Elemento", "Dias Elemento", "Dias Falta", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
 
         if is_admin:
             st.subheader("Histórico da Obra (Edição Admin)")
@@ -606,7 +634,7 @@ if aba == "📝 Diário":
                 ed = ed_h.copy()
                 ed["Data"] = converter_datas(ed["Data"]).dt.strftime("%Y-%m-%d").fillna(ed["Data"].astype(str))
                 ed["ID Obra"] = obra_sel
-                for cn in ["Dias Elemento", "Dias Meio", "Qtd Material"]:
+                for cn in ["Dias Elemento", "Dias Falta", "Dias Meio", "Qtd Material"]:
                     ed[cn] = pd.to_numeric(ed[cn], errors="coerce").fillna(0.0)
                 ed["Custo Elemento"] = ed.apply(lambda r: preco_colab.get(str(r["Elemento"]), 0.0) * r["Dias Elemento"], axis=1)
                 ed["Custo Meio"] = ed.apply(lambda r: preco_meio.get(str(r["Meio"]), 0.0) * r["Dias Meio"], axis=1)
@@ -621,11 +649,12 @@ if aba == "📝 Diário":
         else:
             st.subheader("📋 Histórico da Obra (Apenas Consulta)")
             if not h_obra.empty:
-                cols_consulta = ["Data", "Elemento", "Dias Elemento", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
+                cols_consulta = ["Data", "Elemento", "Dias Elemento", "Dias Falta", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
                 st.dataframe(
                     h_obra[cols_consulta].rename(columns={
                         "Elemento": "Colaborador",
                         "Dias Elemento": "Dias Col.",
+                        "Dias Falta": "Faltas",
                         "Meio": "Viatura",
                         "Dias Meio": "Dias Viat.",
                         "Qtd Material": "Qtd"
@@ -637,10 +666,10 @@ if aba == "📝 Diário":
                 st.info("Ainda não existem registos diários nesta obra.")
 
 # ==========================================
-# 2. PRESENÇAS (CALENDÁRIO + FINS DE SEMANA À PARTE)
+# 2. PRESENÇAS E FALTAS (CALENDÁRIO + FINS DE SEMANA À PARTE)
 # ==========================================
 elif aba == "👷 Presenças":
-    st.subheader("👷 Mapa de Presenças")
+    st.subheader("👷 Mapa de Presenças e Faltas")
     base_pt = df_diario[df_diario["Elemento"] != ""].copy()
     base_pt["Data_dt"] = converter_datas(base_pt["Data"])
     base_pt = base_pt[base_pt["Data_dt"].notna()].copy()
@@ -662,10 +691,11 @@ elif aba == "👷 Presenças":
     flt["Uteis"] = flt["Dias Elemento"].where(~flt["FDS"], 0.0)
     flt["SabDom"] = flt["Dias Elemento"].where(flt["FDS"], 0.0)
 
-    k1, k2, k3 = st.columns(3)
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Dias Úteis (Seg–Sex)", f"{float(flt['Uteis'].sum()):.1f} d")
     k2.metric("Fim de Semana (Sáb/Dom)", f"{float(flt['SabDom'].sum()):.1f} d")
-    k3.metric("Total Geral", f"{float(flt['Dias Elemento'].sum()):.1f} d")
+    k3.metric("Total Trabalhado", f"{float(flt['Dias Elemento'].sum()):.1f} d")
+    k4.metric("Faltas", f"{float(flt['Dias Falta'].sum()):.1f} d")
 
     if not flt.empty:
         quadro_res = flt.groupby("Elemento", as_index=False).agg(
@@ -673,6 +703,7 @@ elif aba == "👷 Presenças":
                 "Dias Úteis": ("Uteis", "sum"),
                 "Sáb / Dom": ("SabDom", "sum"),
                 "Total Dias": ("Dias Elemento", "sum"),
+                "Faltas": ("Dias Falta", "sum"),
                 "Obras": ("ID Obra", lambda s: ", ".join(sorted(set(s.astype(str)))))
             }
         ).rename(columns={"Elemento": "Colaborador"})
@@ -680,11 +711,14 @@ elif aba == "👷 Presenças":
 
     mapa_dia = {}
     if not flt.empty:
-        ag = flt.groupby([flt["Data_dt"].dt.day, "Elemento", "ID Obra"], as_index=False)["Dias Elemento"].sum()
+        ag = flt.groupby([flt["Data_dt"].dt.day, "Elemento", "ID Obra"], as_index=False)[["Dias Elemento", "Dias Falta"]].sum()
         for _, r in ag.iterrows():
             dn = int(r["Data_dt"])
-            tag = f"{r['Elemento']} ({r['Dias Elemento']:.1f}d)" if colab_f == "Todos" else f"{r['ID Obra']} ({r['Dias Elemento']:.1f}d)"
-            mapa_dia.setdefault(dn, []).append(tag)
+            alvo = r["Elemento"] if colab_f == "Todos" else r["ID Obra"]
+            if r["Dias Elemento"] > 0:
+                mapa_dia.setdefault(dn, []).append(f"{alvo} ({r['Dias Elemento']:.1f}d)")
+            if r["Dias Falta"] > 0:
+                mapa_dia.setdefault(dn, []).append(f"{alvo} (FALTA {r['Dias Falta']:.1f}d)")
 
     semanas_mes = calendar.monthcalendar(ano_n, mes_n)
     nomes_sem = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
@@ -702,16 +736,22 @@ elif aba == "👷 Presenças":
     df_calendario = pd.DataFrame(grelha, index=[f"Sem. {i}" for i in range(1, len(semanas_mes) + 1)])
 
     def pintar_util(v):
-        if not v:
+        s = str(v)
+        if not s:
             return "background-color: #f8fafc; color: #94a3b8;"
-        if ":" in str(v):
+        if ":" in s:
+            if "FALTA" in s and "d)" not in s.replace("FALTA ", ""):
+                return "background-color: #fee2e2; color: #991b1b; font-weight: 700;"
             return "background-color: #dbeafe; color: #1e3a8a; font-weight: 700;"
         return "color: #475569;"
 
     def pintar_fds(v):
-        if not v:
+        s = str(v)
+        if not s:
             return "background-color: #f8fafc; color: #94a3b8;"
-        if ":" in str(v):
+        if ":" in s:
+            if "FALTA" in s and "d)" not in s.replace("FALTA ", ""):
+                return "background-color: #fee2e2; color: #991b1b; font-weight: 700;"
             return "background-color: #fde68a; color: #78350f; font-weight: 700;"
         return "background-color: #fffbeb; color: #b45309;"
 
@@ -725,13 +765,16 @@ elif aba == "👷 Presenças":
     st.dataframe(est_cal, use_container_width=True)
 
     if not flt.empty:
-        with st.expander("Ver lista detalhada por dia e notas"):
+        with st.expander("Ver lista detalhada por dia, faltas e notas"):
             det = flt.sort_values(["Data_dt", "Elemento"]).copy()
             det["Data"] = det["Data_dt"].dt.strftime("%d/%m/%Y")
-            det["Tipo"] = det["FDS"].map({True: "Fim de Semana", False: "Dia Útil"})
+            det["Tipo"] = det.apply(
+                lambda r: "Falta" if r["Dias Falta"] > 0 and r["Dias Elemento"] == 0 else ("Fim de Semana" if r["FDS"] else "Dia Útil"),
+                axis=1
+            )
             st.dataframe(
-                det[["Data", "Tipo", "Elemento", "ID Obra", "Dias Elemento", "Notas"]].rename(
-                    columns={"Elemento": "Colaborador", "Dias Elemento": "Dias"}
+                det[["Data", "Tipo", "Elemento", "ID Obra", "Dias Elemento", "Dias Falta", "Notas"]].rename(
+                    columns={"Elemento": "Colaborador", "Dias Elemento": "Dias Trab.", "Dias Falta": "Faltas"}
                 ),
                 use_container_width=True,
                 hide_index=True
@@ -740,21 +783,22 @@ elif aba == "👷 Presenças":
         pdf = FPDF(orientation="L", unit="mm", format="A4")
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 14)
-        tit = f"{cfg['pdf_cab']} | MAPA DE PRESENCAS - {MESES[mes_n].upper()} / {ano_n}" + (f" ({colab_f})" if colab_f != "Todos" else "")
+        tit = f"{cfg['pdf_cab']} | MAPA DE PRESENCAS E FALTAS - {MESES[mes_n].upper()} / {ano_n}" + (f" ({colab_f})" if colab_f != "Todos" else "")
         pdf.cell(0, 8, txt_pdf(tit, 95), ln=True, align="C")
         pdf.ln(2)
 
         pdf.set_font("Helvetica", "B", 8)
-        for cab, larg, al in [("Colaborador", 75, "L"), ("Dias Uteis", 30, "C"), ("Sab / Dom", 35, "C"), ("Total Dias", 30, "C"), ("Obras", 107, "L")]:
+        for cab, larg, al in [("Colaborador", 70, "L"), ("Dias Uteis", 26, "C"), ("Sab / Dom", 28, "C"), ("Total Trab.", 26, "C"), ("Faltas", 22, "C"), ("Obras", 105, "L")]:
             pdf.cell(larg, 6, cab, 1, align=al)
         pdf.ln()
         pdf.set_font("Helvetica", "", 8)
         for _, r in quadro_res.iterrows():
-            pdf.cell(75, 6, txt_pdf(r["Colaborador"], 38), 1)
-            pdf.cell(30, 6, f"{r['Dias Úteis']:.1f}", 1, align="C")
-            pdf.cell(35, 6, f"{r['Sáb / Dom']:.1f}", 1, align="C")
-            pdf.cell(30, 6, f"{r['Total Dias']:.1f}", 1, align="C")
-            pdf.cell(107, 6, txt_pdf(r["Obras"], 55), 1)
+            pdf.cell(70, 6, txt_pdf(r["Colaborador"], 35), 1)
+            pdf.cell(26, 6, f"{r['Dias Úteis']:.1f}", 1, align="C")
+            pdf.cell(28, 6, f"{r['Sáb / Dom']:.1f}", 1, align="C")
+            pdf.cell(26, 6, f"{r['Total Dias']:.1f}", 1, align="C")
+            pdf.cell(22, 6, f"{r['Faltas']:.1f}", 1, align="C")
+            pdf.cell(105, 6, txt_pdf(r["Obras"], 52), 1)
             pdf.ln()
 
         pdf.ln(4)
@@ -791,7 +835,7 @@ elif aba == "👷 Presenças":
             pdf.set_xy(x0, y0 + alt_lin)
 
         st.download_button(
-            "📥 Descarregar Calendário de Presenças (PDF)",
+            "📥 Descarregar Calendário de Presenças e Faltas (PDF)",
             bytes_pdf(pdf),
             file_name=f"Presencas_{cfg['pdf_tag']}_{mes_n:02d}_{ano_n}.pdf",
             mime="application/pdf",
@@ -799,7 +843,7 @@ elif aba == "👷 Presenças":
             use_container_width=True
         )
     else:
-        st.info(f"Sem presenças registadas em {MESES[mes_n]} de {ano_n}.")
+        st.info(f"Sem presenças ou faltas registadas em {MESES[mes_n]} de {ano_n}.")
 
 # ==========================================
 # 3. CONTAS (POR CLIENTE, ESTADO E OBRA)
@@ -807,9 +851,10 @@ elif aba == "👷 Presenças":
 elif aba == "💰 Contas":
     st.subheader("💰 Contas e Orçamentos")
     obras_ct = df_obras.copy()
+    clientes_todos = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
 
     fc1, fc2 = st.columns(2)
-    cli_c = fc1.selectbox("👤 Cliente", ["Todos"] + clientes, key="c_cli") if clientes else "Todos"
+    cli_c = fc1.selectbox("👤 Cliente", ["Todos"] + clientes_todos, key="c_cli") if clientes_todos else "Todos"
     est_c = fc2.multiselect("📌 Estado da Obra", ESTADOS_OBRA, default=ESTADOS_OBRA, key="c_est")
 
     if cli_c != "Todos":
@@ -869,10 +914,10 @@ elif aba == "💰 Contas":
             reg_ob["Data_dt"] = converter_datas(reg_ob["Data"])
             reg_ob = reg_ob.sort_values("Data_dt", ascending=False)
             reg_ob["Data"] = reg_ob["Data_dt"].dt.strftime("%d/%m/%Y").fillna(reg_ob["Data"])
-            cols_g = ["Data", "Elemento", "Dias Elemento", "Custo Elemento", "Meio", "Dias Meio", "Custo Meio", "Material", "Qtd Material", "Custo Material", "Total do Dia", "Notas"]
+            cols_g = ["Data", "Elemento", "Dias Elemento", "Dias Falta", "Custo Elemento", "Meio", "Dias Meio", "Custo Meio", "Material", "Qtd Material", "Custo Material", "Total do Dia", "Notas"]
             st.dataframe(
                 reg_ob[cols_g].rename(columns={
-                    "Elemento": "Colaborador", "Dias Elemento": "Dias Col.", "Custo Elemento": "€ Col.",
+                    "Elemento": "Colaborador", "Dias Elemento": "Dias Col.", "Dias Falta": "Faltas", "Custo Elemento": "€ Col.",
                     "Meio": "Viatura", "Dias Meio": "Dias Viat.", "Custo Meio": "€ Viat.",
                     "Qtd Material": "Qtd", "Custo Material": "€ Mat.", "Total do Dia": "Total (€)"
                 }),
@@ -1023,8 +1068,9 @@ elif aba == "⚙️ Tabelas":
 elif aba == "📄 PDF":
     st.subheader("📄 Relatório PDF da Obra")
     obras_p = df_obras.copy()
-    if clientes:
-        cli_p = st.selectbox("👤 Cliente", ["Todos"] + clientes, key="p_cli")
+    clientes_todos = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
+    if clientes_todos:
+        cli_p = st.selectbox("👤 Cliente", ["Todos"] + clientes_todos, key="p_cli")
         if cli_p != "Todos":
             obras_p = obras_p[obras_p["Cliente"] == cli_p]
 
@@ -1059,7 +1105,10 @@ elif aba == "📄 PDF":
             pdf.ln()
             pdf.set_font("Helvetica", "", 7)
             for _, r in df_rel.iterrows():
-                el = f"{r['Elemento']} ({r['Dias Elemento']}d)" if r["Elemento"] else "-"
+                if r["Elemento"]:
+                    el = f"{r['Elemento']} (FALTA {r['Dias Falta']}d)" if r["Dias Falta"] > 0 and r["Dias Elemento"] == 0 else f"{r['Elemento']} ({r['Dias Elemento']}d)"
+                else:
+                    el = "-"
                 me = f"{r['Meio']} ({r['Dias Meio']}d)" if r["Meio"] else "-"
                 ma = f"{r['Material']} ({r['Qtd Material']})" if r["Material"] else "-"
                 pdf.cell(20, 6, r["Data_dt"].strftime("%d/%m/%Y"), 1)
