@@ -465,7 +465,7 @@ if st.session_state["aviso"]:
 is_admin = (st.session_state["usr_perfil"] == "Admin") or (st.session_state["usr_nome"].strip().lower() == "admin")
 
 if is_admin:
-    aba = st.radio("Navegação", ["📝 Diário", "👷 Presenças", "💰 Contas", "⚙️ Tabelas", "📄 PDF"], horizontal=True, label_visibility="collapsed")
+    aba = st.radio("Navegação", ["📝 Diário", "👷 Presenças", "💰 Contas", "⚙️ Tabelas"], horizontal=True, label_visibility="collapsed")
 else:
     st.caption(f"👤 Sessão iniciada como **{st.session_state['usr_nome']}** ({st.session_state['setor']} — Registo Diário)")
     aba = "📝 Diário"
@@ -1061,65 +1061,3 @@ elif aba == "⚙️ Tabelas":
         st.cache_data.clear()
         st.session_state["aviso"] = "Tabelas e utilizadores guardados!"
         st.rerun()
-
-# ==========================================
-# 5. EXPORTAR RELATÓRIO PDF DA OBRA
-# ==========================================
-elif aba == "📄 PDF":
-    st.subheader("📄 Relatório PDF da Obra")
-    obras_p = df_obras.copy()
-    clientes_todos = sorted([c for c in df_obras["Cliente"].unique().tolist() if c])
-    if clientes_todos:
-        cli_p = st.selectbox("👤 Cliente", ["Todos"] + clientes_todos, key="p_cli")
-        if cli_p != "Todos":
-            obras_p = obras_p[obras_p["Cliente"] == cli_p]
-
-    ids_p = obras_p["ID Obra"].tolist()
-    if ids_p:
-        ob_p = st.selectbox("🏢 Obra", ids_p, format_func=etiqueta_obra)
-        bp = df_diario[df_diario["ID Obra"] == ob_p].copy()
-        bp["Data_dt"] = converter_datas(bp["Data"])
-        bp = bp[bp["Data_dt"].notna()].copy()
-        fim_p = max(date.today(), bp["Data_dt"].max().date()) if not bp.empty else date.today()
-        c1, c2 = st.columns(2)
-        d_ini = c1.date_input("De", value=date.today().replace(day=1), key="p_ini")
-        d_fim = c2.date_input("Até", value=fim_p, key="p_fim")
-        df_rel = bp[(bp["Data_dt"] >= pd.Timestamp(d_ini)) & (bp["Data_dt"] <= pd.Timestamp(d_fim))]
-
-        if not df_rel.empty:
-            inf = df_obras[df_obras["ID Obra"] == ob_p].iloc[0]
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Helvetica", "B", 14)
-            pdf.cell(0, 10, f"{cfg['pdf_cab']} - PRODUCAO E CUSTOS DE OBRA", ln=True, align="C")
-            pdf.set_font("Helvetica", "", 10)
-            pdf.cell(0, 6, txt_pdf(f"{inf['ID Obra']} - {inf['Nome da Obra']} ({inf['Cliente']}) | Estado: {inf['Estado']}", 85), ln=True, align="C")
-            pdf.cell(0, 6, f"Periodo: {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}", ln=True, align="C")
-            pdf.ln(3)
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(0, 7, f"Adjudicado: {inf['Valor Adjudicado']:,.2f} EUR | Gasto: {inf['Total Gasto']:,.2f} EUR | Saldo: {inf['Saldo Restante']:,.2f} EUR", ln=True)
-            pdf.ln(2)
-            pdf.set_font("Helvetica", "B", 8)
-            for cab, larg in [("Data", 20), ("Colaborador", 35), ("Viatura", 30), ("Material", 42), ("Total", 23), ("Notas", 40)]:
-                pdf.cell(larg, 7, cab, 1)
-            pdf.ln()
-            pdf.set_font("Helvetica", "", 7)
-            for _, r in df_rel.iterrows():
-                if r["Elemento"]:
-                    el = f"{r['Elemento']} (FALTA {r['Dias Falta']}d)" if r["Dias Falta"] > 0 and r["Dias Elemento"] == 0 else f"{r['Elemento']} ({r['Dias Elemento']}d)"
-                else:
-                    el = "-"
-                me = f"{r['Meio']} ({r['Dias Meio']}d)" if r["Meio"] else "-"
-                ma = f"{r['Material']} ({r['Qtd Material']})" if r["Material"] else "-"
-                pdf.cell(20, 6, r["Data_dt"].strftime("%d/%m/%Y"), 1)
-                pdf.cell(35, 6, txt_pdf(el, 22), 1)
-                pdf.cell(30, 6, txt_pdf(me, 19), 1)
-                pdf.cell(42, 6, txt_pdf(ma, 26), 1)
-                pdf.cell(23, 6, f"{r['Total do Dia']:,.2f} EUR", 1)
-                pdf.cell(40, 6, txt_pdf(r["Notas"], 25), 1)
-                pdf.ln()
-            st.download_button("📥 Descarregar PDF", bytes_pdf(pdf), file_name=f"Producao_{cfg['pdf_tag']}_{ob_p}_{d_ini}_{d_fim}.pdf", mime="application/pdf", type="primary", use_container_width=True)
-        else:
-            st.info("Sem registos nas datas escolhidas.")
-    else:
-        st.info("Sem obras registadas.")
