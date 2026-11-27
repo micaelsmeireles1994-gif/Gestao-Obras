@@ -19,7 +19,7 @@ st.session_state.setdefault("setor", "🗼 Rede Móvel")
 st.session_state.setdefault("novo_fundo_url", "")
 
 # Link direto da imagem de fundo no Google Drive (atalho definitivo sem depender dos Secrets)
-URL_FUNDO_PADRAO = "https://drive.google.com/file/d/1T28NBTvtfA4368CVQYpDa-T4L8mPIHGa/view?usp=drive_link"
+URL_FUNDO_PADRAO = "https://drive.google.com/file/d/1wb82ul22q3AuhnWZP-CkQKeFv70pR1is/view?usp=sharing"
 
 def extrair_id_drive(url):
     m = re.search(r"/d/([a-zA-Z0-9_-]+)", str(url))
