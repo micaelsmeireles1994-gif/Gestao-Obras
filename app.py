@@ -16,9 +16,21 @@ st.session_state.setdefault("aviso", "")
 st.session_state.setdefault("usr_nome", "")
 st.session_state.setdefault("usr_perfil", "")
 st.session_state.setdefault("setor", "🗼 Rede Móvel")
+st.session_state.setdefault("novo_fundo_url", "")
+
+def extrair_id_drive(url):
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", str(url))
+    if m:
+        return m.group(1)
+    m2 = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", str(url))
+    return m2.group(1) if m2 else ""
 
 @st.cache_data(show_spinner=False)
-def obter_css_fundo():
+def obter_css_fundo(url_secreta=""):
+    b64_img = ""
+    ext = "jpeg"
+
+    # 1. Tenta carregar imagem guardada no repositório GitHub (ou temporária)
     img_path = None
     preferidos = ["fundo.jpg", "fundo.jpeg", "fundo.png", "fundo.webp"]
     ficheiros_pasta = os.listdir(".")
@@ -36,7 +48,38 @@ def obter_css_fundo():
     if img_path and os.path.exists(img_path):
         with open(img_path, "rb") as f:
             b64_img = base64.b64encode(f.read()).decode("utf-8")
-        ext = "png" if img_path.lower().endswith(".png") else "jpeg"
+        if img_path.lower().endswith(".png"):
+            ext = "png"
+        elif img_path.lower().endswith(".webp"):
+            ext = "webp"
+    # 2. Caso não exista no GitHub, carrega definitivamente a partir do link guardado nos Secrets
+    elif url_secreta and str(url_secreta).strip().startswith("http"):
+        url_clean = str(url_secreta).strip()
+        fid = extrair_id_drive(url_clean)
+        candidatos = (
+            [
+                f"https://drive.google.com/uc?export=download&id={fid}",
+                f"https://drive.google.com/thumbnail?id={fid}&sz=w1600",
+            ]
+            if fid else [url_clean]
+        )
+        for u in candidatos:
+            try:
+                resp = requests.get(u, timeout=15)
+                ctype = resp.headers.get("Content-Type", "").lower()
+                if resp.status_code == 200 and resp.content and not resp.content[:15].lstrip().startswith(b"<"):
+                    b64_img = base64.b64encode(resp.content).decode("utf-8")
+                    if "png" in ctype:
+                        ext = "png"
+                    elif "webp" in ctype:
+                        ext = "webp"
+                    else:
+                        ext = "jpeg"
+                    break
+            except Exception:
+                continue
+
+    if b64_img:
         return f"""
             <style>
             .stApp, [data-testid="stAppViewContainer"] {{
@@ -54,7 +97,8 @@ def obter_css_fundo():
         """
     return ""
 
-css_bg = obter_css_fundo()
+url_fundo_sec = st.secrets["fundo_url"] if "fundo_url" in st.secrets else ""
+css_bg = obter_css_fundo(url_fundo_sec)
 if css_bg:
     st.markdown(css_bg, unsafe_allow_html=True)
 
@@ -65,10 +109,6 @@ MESES = {
 }
 
 ESTADOS_OBRA = ["Nova", "Execução", "Parcial", "Concluída"]
-
-def extrair_id_drive(url):
-    m = re.search(r"/d/([a-zA-Z0-9_-]+)", str(url))
-    return m.group(1) if m else ""
 
 def separar_links_fotos(texto_fotos):
     if not texto_fotos:
@@ -1121,17 +1161,28 @@ elif aba == "💰 Contas":
 # 4. TABELAS DE BASE DE DADOS E UTILIZADORES
 # ==========================================
 elif aba == "⚙️ Tabelas":
-    with st.expander("🖼️ Configurar Imagem de Fundo (Marca de Água)", expanded=False):
+    with st.expander("🖼️ Configurar Imagem de Fundo Definitiva (Marca de Água)", expanded=bool(st.session_state["novo_fundo_url"])):
         fich_bg = st.file_uploader("Escolher imagem de fundo (LousaMaia)", type=["jpg", "jpeg", "png", "webp"], key="up_bg_app")
-        if st.button("💾 Aplicar Imagem de Fundo", use_container_width=True):
+        if st.button("💾 Guardar Imagem Definitiva no Google Drive", use_container_width=True):
             if not fich_bg:
                 st.error("Escolhe a imagem primeiro.")
             else:
-                with open("fundo.jpg", "wb") as f_bg:
-                    f_bg.write(fich_bg.getvalue())
-                obter_css_fundo.clear()
-                st.session_state["aviso"] = "Imagem de fundo aplicada!"
-                st.rerun()
+                with st.spinner("A guardar imagem no Google Drive..."):
+                    try:
+                        mime_bg = fich_bg.type if getattr(fich_bg, "type", "") else "image/jpeg"
+                        url_bg_drive = enviar_ficheiro_drive(url_ativa, f"FUNDO_APP_{fich_bg.name}", fich_bg.getvalue(), mime_type=mime_bg)
+                        with open("fundo.jpg", "wb") as f_bg:
+                            f_bg.write(fich_bg.getvalue())
+                        obter_css_fundo.clear()
+                        st.session_state["novo_fundo_url"] = url_bg_drive
+                        st.session_state["aviso"] = "Imagem guardada no Drive! Cola a linha abaixo nos Secrets do Streamlit para nunca mais desaparecer."
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao enviar imagem para o Drive: {e}")
+
+        if st.session_state["novo_fundo_url"]:
+            st.info("Copia esta linha e cola em **Manage app > Settings > Secrets** (depois clica em **Save**):")
+            st.code(f'fundo_url = "{st.session_state["novo_fundo_url"]}"', language="toml")
 
     st.subheader("📎 Associar PDF ou Fotografias a uma Obra")
     ids_todas = df_obras["ID Obra"].tolist()
