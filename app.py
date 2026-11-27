@@ -18,6 +18,9 @@ st.session_state.setdefault("usr_perfil", "")
 st.session_state.setdefault("setor", "🗼 Rede Móvel")
 st.session_state.setdefault("novo_fundo_url", "")
 
+# Link direto da imagem de fundo no Google Drive (atalho definitivo sem depender dos Secrets)
+URL_FUNDO_PADRAO = "https://drive.google.com/file/d/1T28NBTvtfA4368CVQYpDa-T4L8mPIHGa/view?usp=drive_link"
+
 def extrair_id_drive(url):
     m = re.search(r"/d/([a-zA-Z0-9_-]+)", str(url))
     if m:
@@ -25,80 +28,79 @@ def extrair_id_drive(url):
     m2 = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", str(url))
     return m2.group(1) if m2 else ""
 
-@st.cache_data(show_spinner=False)
-def obter_css_fundo(url_secreta=""):
-    b64_img = ""
-    ext = "jpeg"
+@st.cache_data(ttl=3600, show_spinner=False)
+def obter_css_fundo(url_fundo=""):
+    bg_src = ""
 
-    # 1. Tenta carregar imagem guardada no repositório GitHub (ou temporária)
-    img_path = None
+    # 1. Tenta imagem local (se existir no repositório GitHub)
     preferidos = ["fundo.jpg", "fundo.jpeg", "fundo.png", "fundo.webp"]
-    ficheiros_pasta = os.listdir(".")
-    mapa_lower = {f.lower(): f for f in ficheiros_pasta if os.path.isfile(f)}
-    for p in preferidos:
-        if p in mapa_lower:
-            img_path = mapa_lower[p]
-            break
+    mapa_lower = {f.lower(): f for f in os.listdir(".") if os.path.isfile(f)}
+    img_path = next((mapa_lower[p] for p in preferidos if p in mapa_lower), None)
     if not img_path:
-        for f_low, f_real in mapa_lower.items():
-            if f_low.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                img_path = f_real
-                break
+        img_path = next((v for k, v in mapa_lower.items() if k.endswith((".jpg", ".jpeg", ".png", ".webp"))), None)
 
     if img_path and os.path.exists(img_path):
         with open(img_path, "rb") as f:
             b64_img = base64.b64encode(f.read()).decode("utf-8")
-        if img_path.lower().endswith(".png"):
-            ext = "png"
-        elif img_path.lower().endswith(".webp"):
-            ext = "webp"
-    # 2. Caso não exista no GitHub, carrega definitivamente a partir do link guardado nos Secrets
-    elif url_secreta and str(url_secreta).strip().startswith("http"):
-        url_clean = str(url_secreta).strip()
+        ext = "png" if img_path.lower().endswith(".png") else ("webp" if img_path.lower().endswith(".webp") else "jpeg")
+        bg_src = f'url("data:image/{ext};base64,{b64_img}")'
+
+    # 2. Carrega definitivamente a partir do link do Google Drive
+    elif url_fundo and str(url_fundo).strip().startswith("http"):
+        url_clean = str(url_fundo).strip()
         fid = extrair_id_drive(url_clean)
         candidatos = (
             [
-                f"https://drive.google.com/uc?export=download&id={fid}",
+                f"https://lh3.googleusercontent.com/d/{fid}",
                 f"https://drive.google.com/thumbnail?id={fid}&sz=w1600",
+                f"https://drive.google.com/uc?export=download&id={fid}",
             ]
             if fid else [url_clean]
         )
         for u in candidatos:
             try:
-                resp = requests.get(u, timeout=15)
-                ctype = resp.headers.get("Content-Type", "").lower()
-                if resp.status_code == 200 and resp.content and not resp.content[:15].lstrip().startswith(b"<"):
-                    b64_img = base64.b64encode(resp.content).decode("utf-8")
-                    if "png" in ctype:
-                        ext = "png"
-                    elif "webp" in ctype:
-                        ext = "webp"
-                    else:
-                        ext = "jpeg"
-                    break
+                resp = requests.get(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+                raw = resp.content
+                if resp.status_code == 200 and raw:
+                    if raw.startswith(b"\xff\xd8"):
+                        bg_src = f'url("data:image/jpeg;base64,{base64.b64encode(raw).decode("utf-8")}")'
+                        break
+                    elif raw.startswith(b"\x89PNG"):
+                        bg_src = f'url("data:image/png;base64,{base64.b64encode(raw).decode("utf-8")}")'
+                        break
+                    elif raw.startswith(b"RIFF") and b"WEBP" in raw[:16]:
+                        bg_src = f'url("data:image/webp;base64,{base64.b64encode(raw).decode("utf-8")}")'
+                        break
             except Exception:
                 continue
 
-    if b64_img:
+        # Fallback direto no navegador caso o Google bloqueie o servidor
+        if not bg_src:
+            bg_src = (
+                f'url("https://lh3.googleusercontent.com/d/{fid}"), url("https://drive.google.com/thumbnail?id={fid}&sz=w1600")'
+                if fid else f'url("{url_clean}")'
+            )
+
+    if bg_src:
         return f"""
             <style>
-            .stApp, [data-testid="stAppViewContainer"] {{
-                background: linear-gradient(rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.82)),
-                            url("data:image/{ext};base64,{b64_img}") !important;
+            [data-testid="stAppViewContainer"] {{
+                background: linear-gradient(rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.78)),
+                            {bg_src} !important;
                 background-size: cover !important;
                 background-position: center top !important;
                 background-attachment: fixed !important;
                 background-repeat: no-repeat !important;
             }}
-            [data-testid="stHeader"] {{
+            .stApp, [data-testid="stMain"], [data-testid="stHeader"], .main {{
                 background: transparent !important;
             }}
             </style>
         """
     return ""
 
-url_fundo_sec = st.secrets["fundo_url"] if "fundo_url" in st.secrets else ""
-css_bg = obter_css_fundo(url_fundo_sec)
+url_fundo_ativo = st.secrets.get("fundo_url", "") or URL_FUNDO_PADRAO
+css_bg = obter_css_fundo(url_fundo_ativo)
 if css_bg:
     st.markdown(css_bg, unsafe_allow_html=True)
 
@@ -1175,7 +1177,7 @@ elif aba == "⚙️ Tabelas":
                             f_bg.write(fich_bg.getvalue())
                         obter_css_fundo.clear()
                         st.session_state["novo_fundo_url"] = url_bg_drive
-                        st.session_state["aviso"] = "Imagem guardada no Drive! Cola a linha abaixo nos Secrets do Streamlit para nunca mais desaparecer."
+                        st.session_state["aviso"] = "Imagem guardada no Drive! Cola a linha abaixo nos Secrets do Streamlit para atualizar o fundo."
                         st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao enviar imagem para o Drive: {e}")
