@@ -17,7 +17,8 @@ st.session_state.setdefault("usr_nome", "")
 st.session_state.setdefault("usr_perfil", "")
 st.session_state.setdefault("setor", "🗼 Rede Móvel")
 
-def aplicar_fundo_marca_agua():
+@st.cache_data(show_spinner=False)
+def obter_css_fundo():
     img_path = None
     preferidos = ["fundo.jpg", "fundo.jpeg", "fundo.png", "fundo.webp"]
     ficheiros_pasta = os.listdir(".")
@@ -36,8 +37,7 @@ def aplicar_fundo_marca_agua():
         with open(img_path, "rb") as f:
             b64_img = base64.b64encode(f.read()).decode("utf-8")
         ext = "png" if img_path.lower().endswith(".png") else "jpeg"
-        st.markdown(
-            f"""
+        return f"""
             <style>
             .stApp, [data-testid="stAppViewContainer"] {{
                 background: linear-gradient(rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.82)),
@@ -51,11 +51,12 @@ def aplicar_fundo_marca_agua():
                 background: transparent !important;
             }}
             </style>
-            """,
-            unsafe_allow_html=True
-        )
+        """
+    return ""
 
-aplicar_fundo_marca_agua()
+css_bg = obter_css_fundo()
+if css_bg:
+    st.markdown(css_bg, unsafe_allow_html=True)
 
 MESES = {
     1: "01 - Janeiro", 2: "02 - Fevereiro", 3: "03 - Março", 4: "04 - Abril",
@@ -75,7 +76,7 @@ def separar_links_fotos(texto_fotos):
     partes = [p.strip() for p in str(texto_fotos).replace("\n", "|").split("|")]
     return [p for p in partes if p.startswith("http")]
 
-def mostrar_anexos_obra(obra_id, nome_obra, url_pdf, texto_fotos):
+def mostrar_anexos_obra(obra_id, nome_obra, url_pdf, texto_fotos, prefixo="anx"):
     url_limpo = str(url_pdf).strip()
     lista_fotos = separar_links_fotos(texto_fotos)
 
@@ -86,13 +87,13 @@ def mostrar_anexos_obra(obra_id, nome_obra, url_pdf, texto_fotos):
         b1.link_button("📄 Abrir PDF noutra aba", url_limpo, type="primary", use_container_width=True)
         if fid:
             b2.link_button("📥 Descarregar PDF", f"https://drive.google.com/uc?export=download&id={fid}", use_container_width=True)
-            with st.expander("👁️ Consultar PDF diretamente aqui na aplicação"):
+            if st.toggle("👁️ Consultar PDF diretamente aqui na aplicação", key=f"{prefixo}_pdf_{obra_id}"):
                 components.iframe(f"https://drive.google.com/file/d/{fid}/preview", height=520, scrolling=True)
     else:
         st.caption(f"ℹ️ A obra {obra_id} ({nome_obra}) não tem ficheiro PDF anexado.")
 
     if lista_fotos:
-        with st.expander(f"🖼️ Ver Fotografias da Obra ({len(lista_fotos)} foto(s))", expanded=False):
+        if st.toggle(f"🖼️ Ver Fotografias da Obra ({len(lista_fotos)} foto(s))", key=f"{prefixo}_ft_{obra_id}"):
             cols_f = st.columns(2)
             for idx, link_f in enumerate(lista_fotos):
                 fid_f = extrair_id_drive(link_f)
@@ -137,6 +138,14 @@ def bytes_pdf(doc):
     out = doc.output()
     return out.encode("latin-1") if isinstance(out, str) else bytes(out)
 
+def df_igual(df1, df2):
+    try:
+        a = df1.fillna("").astype(str).apply(lambda s: s.str.strip()).reset_index(drop=True)
+        b = df2.fillna("").astype(str).apply(lambda s: s.str.strip()).reset_index(drop=True)
+        return a.equals(b)
+    except Exception:
+        return False
+
 def gerar_pdf_contas_cliente(cfg, cliente_nome, estados_lista, df_obras_cli, df_diario_all):
     pdf = FPDF(orientation="L", unit="mm", format="A4")
     pdf.add_page()
@@ -149,7 +158,11 @@ def gerar_pdf_contas_cliente(cfg, cliente_nome, estados_lista, df_obras_cli, df_
     pdf.ln(3)
 
     ids_cli = set(df_obras_cli["ID Obra"].tolist())
-    reg_cli = df_diario_all[df_diario_all["ID Obra"].isin(ids_cli)].copy() if not df_diario_all.empty else pd.DataFrame()
+    reg_cli = df_diario_all[df_diario_all["ID Obra"].isin(ids_cli)] if not df_diario_all.empty else pd.DataFrame()
+    custos_por_obra = (
+        reg_cli.groupby("ID Obra")[["Custo Elemento", "Custo Meio", "Custo Material"]].sum().to_dict("index")
+        if not reg_cli.empty else {}
+    )
 
     tot_adj = float(df_obras_cli["Valor Adjudicado"].sum())
     tot_gas = float(df_obras_cli["Total Gasto"].sum())
@@ -168,15 +181,9 @@ def gerar_pdf_contas_cliente(cfg, cliente_nome, estados_lista, df_obras_cli, df_
     pdf.ln(4)
 
     cols = [
-        ("ID Obra", 24, "L"),
-        ("Nome da Obra", 63, "L"),
-        ("Cliente", 34, "L"),
-        ("Estado", 22, "C"),
-        ("Adjudicado", 27, "R"),
-        ("Colab.", 25, "R"),
-        ("Viaturas", 25, "R"),
-        ("Materiais", 25, "R"),
-        ("Saldo", 32, "R")
+        ("ID Obra", 24, "L"), ("Nome da Obra", 63, "L"), ("Cliente", 34, "L"),
+        ("Estado", 22, "C"), ("Adjudicado", 27, "R"), ("Colab.", 25, "R"),
+        ("Viaturas", 25, "R"), ("Materiais", 25, "R"), ("Saldo", 32, "R")
     ]
     pdf.set_font("Helvetica", "B", 8)
     pdf.set_fill_color(219, 234, 254)
@@ -187,10 +194,10 @@ def gerar_pdf_contas_cliente(cfg, cliente_nome, estados_lista, df_obras_cli, df_
     pdf.set_font("Helvetica", "", 7.5)
     for _, r in df_obras_cli.iterrows():
         oid = str(r["ID Obra"])
-        sub = reg_cli[reg_cli["ID Obra"] == oid] if not reg_cli.empty else pd.DataFrame()
-        c_col = float(sub["Custo Elemento"].sum()) if not sub.empty else 0.0
-        c_via = float(sub["Custo Meio"].sum()) if not sub.empty else 0.0
-        c_mat = float(sub["Custo Material"].sum()) if not sub.empty else 0.0
+        c_ob = custos_por_obra.get(oid, {})
+        c_col = float(c_ob.get("Custo Elemento", 0.0))
+        c_via = float(c_ob.get("Custo Meio", 0.0))
+        c_mat = float(c_ob.get("Custo Material", 0.0))
         v_ad = float(r["Valor Adjudicado"])
         v_sa = float(r["Saldo Restante"])
 
@@ -271,6 +278,62 @@ def gerar_pdf_contas_obra(cfg, info_obra, df_reg_obra, d_ini=None, d_fim=None):
 
     return bytes_pdf(pdf)
 
+def gerar_pdf_presencas(cfg, mes_n, ano_n, colab_f, quadro_res, semanas_mes, mapa_dia):
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    tit = f"{cfg['pdf_cab']} | MAPA DE PRESENCAS E FALTAS - {MESES[mes_n].upper()} / {ano_n}" + (f" ({colab_f})" if colab_f != "Todos" else "")
+    pdf.cell(0, 8, txt_pdf(tit, 95), ln=True, align="C")
+    pdf.ln(2)
+
+    pdf.set_font("Helvetica", "B", 8)
+    for cab, larg, al in [("Colaborador", 70, "L"), ("Dias Uteis", 26, "C"), ("Sab / Dom", 28, "C"), ("Total Trab.", 26, "C"), ("Faltas", 22, "C"), ("Obras", 105, "L")]:
+        pdf.cell(larg, 6, cab, 1, align=al)
+    pdf.ln()
+    pdf.set_font("Helvetica", "", 8)
+    for _, r in quadro_res.iterrows():
+        pdf.cell(70, 6, txt_pdf(r["Colaborador"], 35), 1)
+        pdf.cell(26, 6, f"{r['Dias Úteis']:.1f}", 1, align="C")
+        pdf.cell(28, 6, f"{r['Sáb / Dom']:.1f}", 1, align="C")
+        pdf.cell(26, 6, f"{r['Total Dias']:.1f}", 1, align="C")
+        pdf.cell(22, 6, f"{r['Faltas']:.1f}", 1, align="C")
+        pdf.cell(105, 6, txt_pdf(r["Obras"], 52), 1)
+        pdf.ln()
+
+    pdf.ln(4)
+    cab_sem = ["Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado (FDS)", "Domingo (FDS)"]
+    larg_c = 39.5
+    pdf.set_font("Helvetica", "B", 8)
+    for i, ds in enumerate(cab_sem):
+        pdf.set_fill_color(254, 243, 199) if i >= 5 else pdf.set_fill_color(241, 245, 249)
+        pdf.cell(larg_c, 6, ds, 1, align="C", fill=True)
+    pdf.ln()
+
+    alt_disp = max(90.0, 195.0 - pdf.get_y())
+    alt_lin = max(16.0, alt_disp / max(len(semanas_mes), 1))
+    for sem in semanas_mes:
+        x0, y0 = pdf.get_x(), pdf.get_y()
+        for i, d in enumerate(sem):
+            xc = x0 + i * larg_c
+            pdf.set_xy(xc, y0)
+            if d == 0:
+                pdf.set_fill_color(248, 250, 252)
+                pdf.cell(larg_c, alt_lin, "", 1, fill=True)
+            else:
+                pdf.set_fill_color(255, 251, 235) if i >= 5 else pdf.set_fill_color(255, 255, 255)
+                pdf.rect(xc, y0, larg_c, alt_lin, style="DF")
+                pdf.set_xy(xc + 1.5, y0 + 1)
+                pdf.set_font("Helvetica", "B", 8)
+                pdf.cell(larg_c - 3, 4, str(d))
+                itens_d = mapa_dia.get(d, [])
+                if itens_d:
+                    pdf.set_xy(xc + 1.5, y0 + 5)
+                    pdf.set_font("Helvetica", "", 6.5)
+                    bloco = "\n".join(itens_d[:4]) + (f"\n+{len(itens_d)-4}..." if len(itens_d) > 4 else "")
+                    pdf.multi_cell(larg_c - 3, 3.1, txt_pdf(bloco, 140))
+        pdf.set_xy(x0, y0 + alt_lin)
+    return bytes_pdf(pdf)
+
 def ajustar_colunas(df, sinonimos):
     if df.empty:
         return df
@@ -284,7 +347,17 @@ def ajustar_colunas(df, sinonimos):
                     break
     return df.rename(columns=trocas) if trocas else df
 
-@st.cache_data(ttl=15)
+def converter_datas(serie):
+    s = serie.fillna("").astype(str).str.strip()
+    iso = s.str.match(r"^\d{4}-\d{2}-\d{2}")
+    res = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+    if iso.any():
+        res.loc[iso] = pd.to_datetime(s[iso], format="mixed", errors="coerce", utc=True).dt.tz_localize(None).dt.round("D")
+    if (~iso).any():
+        res.loc[~iso] = pd.to_datetime(s[~iso], format="mixed", dayfirst=True, errors="coerce").dt.round("D")
+    return res
+
+@st.cache_data(ttl=300, show_spinner=False)
 def ler_servidor(url_script):
     r = requests.get(url_script, timeout=15)
     r.raise_for_status()
@@ -365,10 +438,50 @@ def ler_servidor(url_script):
         pos_fallback=True,
         max_pos=14
     )
+
+    for col in ["ID Obra", "Nome da Obra", "Cliente", "Estado", "PDF", "Fotos"]:
+        obras[col] = obras[col].fillna("").astype(str).str.strip()
+    obras["ID Obra"] = obras["ID Obra"].str.replace(r"\.0$", "", regex=True)
+    obras["Estado"] = obras["Estado"].apply(normalizar_estado)
+    sem_id_obra = (obras["ID Obra"] == "") & (obras["Nome da Obra"] != "")
+    if sem_id_obra.any():
+        obras.loc[sem_id_obra, "ID Obra"] = [f"OB-{i+1:02d}" for i in obras[sem_id_obra].index]
+    for col in ["Valor Adjudicado", "Total Gasto", "Saldo Restante"]:
+        obras[col] = pd.to_numeric(obras[col], errors="coerce").fillna(0.0)
+    obras = obras[obras["ID Obra"] != ""].copy()
+
+    elem["Elemento"] = elem["Elemento"].fillna("").astype(str).str.strip()
+    elem["Valor_Dia"] = pd.to_numeric(elem["Valor_Dia"], errors="coerce").fillna(0.0)
+    elem = elem[elem["Elemento"] != ""].copy()
+
+    for col in ["Utilizador", "Senha", "Perfil"]:
+        users[col] = users[col].fillna("").astype(str).str.strip()
+    users["Senha"] = users["Senha"].str.replace(r"\.0$", "", regex=True)
+    users.loc[users["Perfil"] == "", "Perfil"] = "Admin"
+    users = users[users["Utilizador"] != ""].copy()
+    if users.empty:
+        users = pd.DataFrame([{"Utilizador": "admin", "Senha": "1234", "Perfil": "Admin"}])
+
+    meios["Meio / Equipamento"] = meios["Meio / Equipamento"].fillna("").astype(str).str.strip()
+    meios["Valor_Dia"] = pd.to_numeric(meios["Valor_Dia"], errors="coerce").fillna(0.0)
+    meios = meios[meios["Meio / Equipamento"] != ""].copy()
+
+    for col in ["Material", "Unidade"]:
+        mat[col] = mat[col].fillna("").astype(str).str.strip()
+    mat["Preco_Unitario"] = pd.to_numeric(mat["Preco_Unitario"], errors="coerce").fillna(0.0)
+    mat = mat[mat["Material"] != ""].copy()
+
+    for col in ["Data", "ID Obra", "Elemento", "Meio", "Material", "Notas"]:
+        diario[col] = diario[col].fillna("").astype(str).str.strip()
+    diario["ID Obra"] = diario["ID Obra"].str.replace(r"\.0$", "", regex=True)
+    for col in ["Dias Elemento", "Custo Elemento", "Dias Meio", "Custo Meio", "Qtd Material", "Custo Material", "Total do Dia", "Dias Falta"]:
+        diario[col] = pd.to_numeric(diario[col], errors="coerce").fillna(0.0)
+    diario["Data_dt"] = converter_datas(diario["Data"])
+
     return obras, elem, users, meios, mat, diario
 
 def guardar_aba(url_script, aba, df):
-    limpo = df.fillna("")
+    limpo = df.drop(columns=["Data_dt"], errors="ignore").fillna("")
     linhas = [limpo.columns.tolist()] + limpo.values.tolist()
     r = requests.post(
         url_script,
@@ -447,16 +560,6 @@ def recalcular_obras(url_script, df_o, df_d):
     cols_ordem = ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Total Gasto", "Saldo Restante", "Estado", "PDF", "Fotos"]
     guardar_aba(url_script, "Obras", o[cols_ordem])
 
-def converter_datas(serie):
-    s = serie.fillna("").astype(str).str.strip()
-    iso = s.str.match(r"^\d{4}-\d{2}-\d{2}")
-    res = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
-    if iso.any():
-        res.loc[iso] = pd.to_datetime(s[iso], format="mixed", errors="coerce", utc=True).dt.tz_localize(None).dt.round("D")
-    if (~iso).any():
-        res.loc[~iso] = pd.to_datetime(s[~iso], format="mixed", dayfirst=True, errors="coerce").dt.round("D")
-    return res
-
 # ==========================================
 # ECRÃ DE LOGIN COM ESCOLHA DE SETOR
 # ==========================================
@@ -494,9 +597,6 @@ if not st.session_state["usr_nome"]:
         else:
             try:
                 _, _, df_u_login, _, _, _ = ler_servidor(url_login)
-                for col in ["Utilizador", "Senha", "Perfil"]:
-                    df_u_login[col] = df_u_login[col].fillna("").astype(str).str.strip()
-                df_u_login["Senha"] = df_u_login["Senha"].str.replace(r"\.0$", "", regex=True)
                 match = df_u_login[(df_u_login["Utilizador"].str.lower() == u_clean) & (df_u_login["Senha"] == s_clean)]
                 if not match.empty:
                     nome_u = match.iloc[0]["Utilizador"]
@@ -514,7 +614,7 @@ if not st.session_state["usr_nome"]:
     st.stop()
 
 # ==========================================
-# CABEÇALHO E CARREGAMENTO DE DADOS DO SETOR ATIVO
+# CABEÇALHO E CARREGAMENTO DE DADOS (CACHE 5 MIN)
 # ==========================================
 cfg = obter_config_setor(st.session_state["setor"])
 chave_ativa = cfg["secret_key"]
@@ -528,60 +628,24 @@ if chave_ativa not in st.secrets:
 
 url_ativa = st.secrets[chave_ativa]
 
-ct1, ct2 = st.columns([3, 1])
+ct1, ct2, ct3 = st.columns([3, 1, 1])
 ct1.title(cfg["titulo"])
-if ct2.button(f"🚪 Sair ({st.session_state['usr_nome']})", use_container_width=True):
+if ct2.button("🔄 Atualizar", use_container_width=True, help="Sincronizar novamente com a folha Google"):
+    ler_servidor.clear()
+    st.rerun()
+if ct3.button(f"🚪 Sair ({st.session_state['usr_nome']})", use_container_width=True):
     st.session_state["usr_nome"] = ""
     st.session_state["usr_perfil"] = ""
     st.rerun()
 
-with st.spinner(f"A carregar dados ({st.session_state['setor']})..."):
-    try:
-        df_obras, df_elem, df_users, df_meios, df_mat, df_diario = ler_servidor(url_ativa)
-    except Exception as erro:
-        st.error(f"Erro ao ligar à folha Google ({st.session_state['setor']}): {erro}")
-        if st.button("🔄 Tentar novamente"):
-            st.cache_data.clear()
-            st.rerun()
-        st.stop()
-
-for col in ["ID Obra", "Nome da Obra", "Cliente", "Estado", "PDF", "Fotos"]:
-    df_obras[col] = df_obras[col].fillna("").astype(str).str.strip()
-df_obras["ID Obra"] = df_obras["ID Obra"].str.replace(r"\.0$", "", regex=True)
-df_obras["Estado"] = df_obras["Estado"].apply(normalizar_estado)
-sem_id_obra = (df_obras["ID Obra"] == "") & (df_obras["Nome da Obra"] != "")
-if sem_id_obra.any():
-    df_obras.loc[sem_id_obra, "ID Obra"] = [f"OB-{i+1:02d}" for i in df_obras[sem_id_obra].index]
-for col in ["Valor Adjudicado", "Total Gasto", "Saldo Restante"]:
-    df_obras[col] = pd.to_numeric(df_obras[col], errors="coerce").fillna(0.0)
-df_obras = df_obras[df_obras["ID Obra"] != ""].copy()
-
-df_elem["Elemento"] = df_elem["Elemento"].fillna("").astype(str).str.strip()
-df_elem["Valor_Dia"] = pd.to_numeric(df_elem["Valor_Dia"], errors="coerce").fillna(0.0)
-df_elem = df_elem[df_elem["Elemento"] != ""].copy()
-
-for col in ["Utilizador", "Senha", "Perfil"]:
-    df_users[col] = df_users[col].fillna("").astype(str).str.strip()
-df_users["Senha"] = df_users["Senha"].str.replace(r"\.0$", "", regex=True)
-df_users.loc[df_users["Perfil"] == "", "Perfil"] = "Admin"
-df_users = df_users[df_users["Utilizador"] != ""].copy()
-if df_users.empty:
-    df_users = pd.DataFrame([{"Utilizador": "admin", "Senha": "1234", "Perfil": "Admin"}])
-
-df_meios["Meio / Equipamento"] = df_meios["Meio / Equipamento"].fillna("").astype(str).str.strip()
-df_meios["Valor_Dia"] = pd.to_numeric(df_meios["Valor_Dia"], errors="coerce").fillna(0.0)
-df_meios = df_meios[df_meios["Meio / Equipamento"] != ""].copy()
-
-for col in ["Material", "Unidade"]:
-    df_mat[col] = df_mat[col].fillna("").astype(str).str.strip()
-df_mat["Preco_Unitario"] = pd.to_numeric(df_mat["Preco_Unitario"], errors="coerce").fillna(0.0)
-df_mat = df_mat[df_mat["Material"] != ""].copy()
-
-for col in ["Data", "ID Obra", "Elemento", "Meio", "Material", "Notas"]:
-    df_diario[col] = df_diario[col].fillna("").astype(str).str.strip()
-df_diario["ID Obra"] = df_diario["ID Obra"].str.replace(r"\.0$", "", regex=True)
-for col in ["Dias Elemento", "Custo Elemento", "Dias Meio", "Custo Meio", "Qtd Material", "Custo Material", "Total do Dia", "Dias Falta"]:
-    df_diario[col] = pd.to_numeric(df_diario[col], errors="coerce").fillna(0.0)
+try:
+    df_obras, df_elem, df_users, df_meios, df_mat, df_diario = ler_servidor(url_ativa)
+except Exception as erro:
+    st.error(f"Erro ao ligar à folha Google ({st.session_state['setor']}): {erro}")
+    if st.button("🔄 Tentar novamente"):
+        ler_servidor.clear()
+        st.rerun()
+    st.stop()
 
 preco_colab = dict(zip(df_elem["Elemento"], df_elem["Valor_Dia"]))
 preco_meio = dict(zip(df_meios["Meio / Equipamento"], df_meios["Valor_Dia"]))
@@ -616,7 +680,7 @@ def etiqueta_obra(x):
 # ==========================================
 if aba == "📝 Diário":
     k = st.session_state["ciclo"]
-    obras_disp = df_obras[~df_obras["Estado"].str.lower().isin(["concluída", "concluida"])].copy()
+    obras_disp = df_obras[~df_obras["Estado"].str.lower().isin(["concluída", "concluida"])]
     clientes_ativos = sorted([c for c in obras_disp["Cliente"].unique().tolist() if c])
 
     if clientes_ativos:
@@ -634,7 +698,8 @@ if aba == "📝 Diário":
             obra_sel,
             nomes_obras.get(obra_sel, ""),
             pdfs_obras.get(obra_sel, ""),
-            fotos_obras.get(obra_sel, "")
+            fotos_obras.get(obra_sel, ""),
+            prefixo="d"
         )
         st.divider()
 
@@ -692,11 +757,12 @@ if aba == "📝 Diário":
         elif not eq_sel and not ft_sel and not vi_sel and not mt_sel and not obs.strip() and not fotos_diario:
             st.error("Preenche pelo menos um campo ou adiciona uma fotografia.")
         else:
-            with st.spinner("A gravar registo e fotografias..."):
+            with st.spinner("A gravar registo..."):
                 try:
+                    obras_edit = df_obras.copy()
                     n_fotos = 0
                     if fotos_diario:
-                        n_fotos = adicionar_fotos_obra(df_obras, obra_sel, fotos_diario, url_ativa)
+                        n_fotos = adicionar_fotos_obra(obras_edit, obra_sel, fotos_diario, url_ativa)
 
                     l_eq = [(c, dias_eq[c]) for c in eq_sel if dias_eq[c] > 0]
                     l_ft = [(c, dias_ft[c], motivo_ft[c].strip()) for c in ft_sel if dias_ft[c] > 0]
@@ -738,13 +804,13 @@ if aba == "📝 Diário":
                         prox += 1
 
                     if linhas_novas:
-                        atualizado = pd.concat([df_diario, pd.DataFrame(linhas_novas)], ignore_index=True)
+                        atualizado = pd.concat([df_diario.drop(columns=["Data_dt"], errors="ignore"), pd.DataFrame(linhas_novas)], ignore_index=True)
                         guardar_aba(url_ativa, "Registos_Diarios", atualizado)
                     else:
                         atualizado = df_diario
 
-                    recalcular_obras(url_ativa, df_obras, atualizado)
-                    st.cache_data.clear()
+                    recalcular_obras(url_ativa, obras_edit, atualizado)
+                    ler_servidor.clear()
                     st.session_state["ciclo"] += 1
                     msg_ft = f", {len(l_ft)} falta(s)" if l_ft else ""
                     msg_foto = f" e {n_fotos} foto(s)" if n_fotos else ""
@@ -755,9 +821,7 @@ if aba == "📝 Diário":
 
     if obra_sel:
         st.divider()
-        h_obra = df_diario[df_diario["ID Obra"] == obra_sel].copy()
-        h_obra["Data_dt"] = converter_datas(h_obra["Data"])
-        h_obra = h_obra.sort_values("Data_dt", ascending=False)
+        h_obra = df_diario[df_diario["ID Obra"] == obra_sel].sort_values("Data_dt", ascending=False).copy()
         h_obra["Data"] = h_obra["Data_dt"].dt.strftime("%d/%m/%Y").fillna(h_obra["Data"])
         cols_h = ["ID_Registo", "Data", "Elemento", "Dias Elemento", "Dias Falta", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
 
@@ -774,10 +838,11 @@ if aba == "📝 Diário":
                 ed["Custo Meio"] = ed.apply(lambda r: preco_meio.get(str(r["Meio"]), 0.0) * r["Dias Meio"], axis=1)
                 ed["Custo Material"] = ed.apply(lambda r: preco_mat.get(str(r["Material"]), 0.0) * r["Qtd Material"], axis=1)
                 ed["Total do Dia"] = ed["Custo Elemento"] + ed["Custo Meio"] + ed["Custo Material"]
-                final = pd.concat([df_diario[df_diario["ID Obra"] != obra_sel], ed[df_diario.columns.tolist()]], ignore_index=True)
+                cols_save = [c for c in df_diario.columns if c != "Data_dt"]
+                final = pd.concat([df_diario[df_diario["ID Obra"] != obra_sel][cols_save], ed[cols_save]], ignore_index=True)
                 guardar_aba(url_ativa, "Registos_Diarios", final)
                 recalcular_obras(url_ativa, df_obras, final)
-                st.cache_data.clear()
+                ler_servidor.clear()
                 st.session_state["aviso"] = "Histórico atualizado!"
                 st.rerun()
         else:
@@ -786,12 +851,8 @@ if aba == "📝 Diário":
                 cols_consulta = ["Data", "Elemento", "Dias Elemento", "Dias Falta", "Meio", "Dias Meio", "Material", "Qtd Material", "Notas"]
                 st.dataframe(
                     h_obra[cols_consulta].rename(columns={
-                        "Elemento": "Colaborador",
-                        "Dias Elemento": "Dias Col.",
-                        "Dias Falta": "Faltas",
-                        "Meio": "Viatura",
-                        "Dias Meio": "Dias Viat.",
-                        "Qtd Material": "Qtd"
+                        "Elemento": "Colaborador", "Dias Elemento": "Dias Col.", "Dias Falta": "Faltas",
+                        "Meio": "Viatura", "Dias Meio": "Dias Viat.", "Qtd Material": "Qtd"
                     }),
                     use_container_width=True,
                     hide_index=True
@@ -804,9 +865,7 @@ if aba == "📝 Diário":
 # ==========================================
 elif aba == "👷 Presenças":
     st.subheader("👷 Mapa de Presenças e Faltas")
-    base_pt = df_diario[df_diario["Elemento"] != ""].copy()
-    base_pt["Data_dt"] = converter_datas(base_pt["Data"])
-    base_pt = base_pt[base_pt["Data_dt"].notna()].copy()
+    base_pt = df_diario[(df_diario["Elemento"] != "") & (df_diario["Data_dt"].notna())]
 
     hoje = date.today()
     anos_pt = sorted(set([hoje.year - 1, hoje.year, hoje.year + 1] + (base_pt["Data_dt"].dt.year.tolist() if not base_pt.empty else [])))
@@ -914,68 +973,16 @@ elif aba == "👷 Presenças":
                 hide_index=True
             )
 
-        pdf = FPDF(orientation="L", unit="mm", format="A4")
-        pdf.add_page()
-        pdf.set_font("Helvetica", "B", 14)
-        tit = f"{cfg['pdf_cab']} | MAPA DE PRESENCAS E FALTAS - {MESES[mes_n].upper()} / {ano_n}" + (f" ({colab_f})" if colab_f != "Todos" else "")
-        pdf.cell(0, 8, txt_pdf(tit, 95), ln=True, align="C")
-        pdf.ln(2)
-
-        pdf.set_font("Helvetica", "B", 8)
-        for cab, larg, al in [("Colaborador", 70, "L"), ("Dias Uteis", 26, "C"), ("Sab / Dom", 28, "C"), ("Total Trab.", 26, "C"), ("Faltas", 22, "C"), ("Obras", 105, "L")]:
-            pdf.cell(larg, 6, cab, 1, align=al)
-        pdf.ln()
-        pdf.set_font("Helvetica", "", 8)
-        for _, r in quadro_res.iterrows():
-            pdf.cell(70, 6, txt_pdf(r["Colaborador"], 35), 1)
-            pdf.cell(26, 6, f"{r['Dias Úteis']:.1f}", 1, align="C")
-            pdf.cell(28, 6, f"{r['Sáb / Dom']:.1f}", 1, align="C")
-            pdf.cell(26, 6, f"{r['Total Dias']:.1f}", 1, align="C")
-            pdf.cell(22, 6, f"{r['Faltas']:.1f}", 1, align="C")
-            pdf.cell(105, 6, txt_pdf(r["Obras"], 52), 1)
-            pdf.ln()
-
-        pdf.ln(4)
-        cab_sem = ["Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado (FDS)", "Domingo (FDS)"]
-        larg_c = 39.5
-        pdf.set_font("Helvetica", "B", 8)
-        for i, ds in enumerate(cab_sem):
-            pdf.set_fill_color(254, 243, 199) if i >= 5 else pdf.set_fill_color(241, 245, 249)
-            pdf.cell(larg_c, 6, ds, 1, align="C", fill=True)
-        pdf.ln()
-
-        alt_disp = max(90.0, 195.0 - pdf.get_y())
-        alt_lin = max(16.0, alt_disp / max(len(semanas_mes), 1))
-        for sem in semanas_mes:
-            x0, y0 = pdf.get_x(), pdf.get_y()
-            for i, d in enumerate(sem):
-                xc = x0 + i * larg_c
-                pdf.set_xy(xc, y0)
-                if d == 0:
-                    pdf.set_fill_color(248, 250, 252)
-                    pdf.cell(larg_c, alt_lin, "", 1, fill=True)
-                else:
-                    pdf.set_fill_color(255, 251, 235) if i >= 5 else pdf.set_fill_color(255, 255, 255)
-                    pdf.rect(xc, y0, larg_c, alt_lin, style="DF")
-                    pdf.set_xy(xc + 1.5, y0 + 1)
-                    pdf.set_font("Helvetica", "B", 8)
-                    pdf.cell(larg_c - 3, 4, str(d))
-                    itens_d = mapa_dia.get(d, [])
-                    if itens_d:
-                        pdf.set_xy(xc + 1.5, y0 + 5)
-                        pdf.set_font("Helvetica", "", 6.5)
-                        bloco = "\n".join(itens_d[:4]) + (f"\n+{len(itens_d)-4}..." if len(itens_d) > 4 else "")
-                        pdf.multi_cell(larg_c - 3, 3.1, txt_pdf(bloco, 140))
-            pdf.set_xy(x0, y0 + alt_lin)
-
-        st.download_button(
-            "📥 Descarregar Calendário de Presenças e Faltas (PDF)",
-            bytes_pdf(pdf),
-            file_name=f"Presencas_{cfg['pdf_tag']}_{mes_n:02d}_{ano_n}.pdf",
-            mime="application/pdf",
-            type="primary",
-            use_container_width=True
-        )
+        if st.button("📄 Preparar PDF de Presenças e Faltas", use_container_width=True):
+            pdf_pt_bytes = gerar_pdf_presencas(cfg, mes_n, ano_n, colab_f, quadro_res, semanas_mes, mapa_dia)
+            st.download_button(
+                "📥 Descarregar Calendário de Presenças e Faltas (PDF)",
+                pdf_pt_bytes,
+                file_name=f"Presencas_{cfg['pdf_tag']}_{mes_n:02d}_{ano_n}.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True
+            )
     else:
         st.info(f"Sem presenças ou faltas registadas em {MESES[mes_n]} de {ano_n}.")
 
@@ -1006,16 +1013,18 @@ elif aba == "💰 Contas":
         c2.metric("Total Gasto", f"{gas_c:,.2f} €")
         c3.metric("Saldo", f"{adj_c - gas_c:,.2f} €")
 
-        pdf_cli_bytes = gerar_pdf_contas_cliente(cfg, cli_c, est_c, obras_ct, df_diario)
-        tag_cli_nome = "Todos_Clientes" if cli_c == "Todos" else re.sub(r"[^a-zA-Z0-9_-]", "_", cli_c)
-        lbl_btn_cli = f"📄 Relatório de Contas por Cliente ({cli_c}) — PDF" if cli_c != "Todos" else "📄 Relatório Geral de Contas (Todos os Clientes) — PDF"
-        st.download_button(
-            lbl_btn_cli,
-            pdf_cli_bytes,
-            file_name=f"Contas_Cliente_{cfg['pdf_tag']}_{tag_cli_nome}_{date.today()}.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
+        lbl_btn_cli = f"📄 Preparar Relatório de Contas por Cliente ({cli_c})" if cli_c != "Todos" else "📄 Preparar Relatório Geral (Todos os Clientes)"
+        if st.button(lbl_btn_cli, use_container_width=True):
+            pdf_cli_bytes = gerar_pdf_contas_cliente(cfg, cli_c, est_c, obras_ct, df_diario)
+            tag_cli_nome = "Todos_Clientes" if cli_c == "Todos" else re.sub(r"[^a-zA-Z0-9_-]", "_", cli_c)
+            st.download_button(
+                "📥 Descarregar Relatório por Cliente (PDF)",
+                pdf_cli_bytes,
+                file_name=f"Contas_Cliente_{cfg['pdf_tag']}_{tag_cli_nome}_{date.today()}.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True
+            )
         st.divider()
 
     ids_ct = obras_ct["ID Obra"].tolist()
@@ -1025,14 +1034,12 @@ elif aba == "💰 Contas":
             ob_c,
             nomes_obras.get(ob_c, ""),
             pdfs_obras.get(ob_c, ""),
-            fotos_obras.get(ob_c, "")
+            fotos_obras.get(ob_c, ""),
+            prefixo="c"
         )
 
         info = df_obras[df_obras["ID Obra"] == ob_c].iloc[0]
-        reg_ob = df_diario[df_diario["ID Obra"] == ob_c].copy()
-        if not reg_ob.empty:
-            reg_ob["Data_dt"] = converter_datas(reg_ob["Data"])
-            reg_ob = reg_ob.sort_values("Data_dt", ascending=False)
+        reg_ob = df_diario[df_diario["ID Obra"] == ob_c].sort_values("Data_dt", ascending=False).copy()
 
         v_adj = float(info["Valor Adjudicado"])
         g_eq = float(reg_ob["Custo Elemento"].sum()) if not reg_ob.empty else 0.0
@@ -1057,7 +1064,7 @@ elif aba == "💰 Contas":
         g2.metric("🚚 Viaturas", f"{g_vi:,.2f} €")
         g3.metric("📦 Materiais", f"{g_mt:,.2f} €")
 
-        with st.expander("📄 Gerar Relatório de Contas desta Obra (PDF)", expanded=False):
+        with st.expander("📄 Relatório de Contas desta Obra (PDF)", expanded=False):
             datas_validas = reg_ob["Data_dt"].dropna() if not reg_ob.empty else pd.Series(dtype="datetime64[ns]")
             dt_min_ob = datas_validas.min().date() if not datas_validas.empty else date.today().replace(day=1)
             dt_max_ob = max(date.today(), datas_validas.max().date()) if not datas_validas.empty else date.today()
@@ -1065,20 +1072,20 @@ elif aba == "💰 Contas":
             d_ini_c = dc1.date_input("De", value=dt_min_ob, key=f"c_ini_{ob_c}")
             d_fim_c = dc2.date_input("Até", value=dt_max_ob, key=f"c_fim_{ob_c}")
 
-            if not reg_ob.empty:
-                reg_pdf_ob = reg_ob[(reg_ob["Data_dt"] >= pd.Timestamp(d_ini_c)) & (reg_ob["Data_dt"] <= pd.Timestamp(d_fim_c))].sort_values("Data_dt", ascending=True)
-            else:
-                reg_pdf_ob = reg_ob
-
-            pdf_ob_bytes = gerar_pdf_contas_obra(cfg, info, reg_pdf_ob, d_ini=d_ini_c, d_fim=d_fim_c)
-            st.download_button(
-                f"📥 Descarregar Relatório da Obra {ob_c} (PDF)",
-                pdf_ob_bytes,
-                file_name=f"Contas_Obra_{cfg['pdf_tag']}_{ob_c}_{d_ini_c}_{d_fim_c}.pdf",
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True
-            )
+            if st.button(f"⚙️ Preparar Relatório da Obra {ob_c}", use_container_width=True):
+                if not reg_ob.empty:
+                    reg_pdf_ob = reg_ob[(reg_ob["Data_dt"] >= pd.Timestamp(d_ini_c)) & (reg_ob["Data_dt"] <= pd.Timestamp(d_fim_c))].sort_values("Data_dt", ascending=True)
+                else:
+                    reg_pdf_ob = reg_ob
+                pdf_ob_bytes = gerar_pdf_contas_obra(cfg, info, reg_pdf_ob, d_ini=d_ini_c, d_fim=d_fim_c)
+                st.download_button(
+                    f"📥 Descarregar Relatório da Obra {ob_c} (PDF)",
+                    pdf_ob_bytes,
+                    file_name=f"Contas_Obra_{cfg['pdf_tag']}_{ob_c}_{d_ini_c}_{d_fim_c}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    use_container_width=True
+                )
 
         st.divider()
         st.markdown("**Todos os Gastos da Obra**")
@@ -1122,6 +1129,7 @@ elif aba == "⚙️ Tabelas":
             else:
                 with open("fundo.jpg", "wb") as f_bg:
                     f_bg.write(fich_bg.getvalue())
+                obter_css_fundo.clear()
                 st.session_state["aviso"] = "Imagem de fundo aplicada!"
                 st.rerun()
 
@@ -1139,11 +1147,12 @@ elif aba == "⚙️ Tabelas":
                 else:
                     with st.spinner("A enviar PDF para o Google Drive..."):
                         try:
+                            obras_edit = df_obras.copy()
                             nome_limpo = f"{obra_up}_{fich_pdf.name}"
                             url_drive = enviar_ficheiro_drive(url_ativa, nome_limpo, fich_pdf.getvalue(), mime_type="application/pdf")
-                            df_obras.loc[df_obras["ID Obra"] == obra_up, "PDF"] = url_drive
-                            recalcular_obras(url_ativa, df_obras, df_diario)
-                            st.cache_data.clear()
+                            obras_edit.loc[obras_edit["ID Obra"] == obra_up, "PDF"] = url_drive
+                            recalcular_obras(url_ativa, obras_edit, df_diario)
+                            ler_servidor.clear()
                             st.session_state["aviso"] = f"PDF associado com sucesso à obra {obra_up}!"
                             st.rerun()
                         except Exception as e:
@@ -1162,9 +1171,10 @@ elif aba == "⚙️ Tabelas":
                 else:
                     with st.spinner("A enviar fotografias para o Google Drive..."):
                         try:
-                            qtd_env = adicionar_fotos_obra(df_obras, obra_up, fichs_fotos, url_ativa)
-                            recalcular_obras(url_ativa, df_obras, df_diario)
-                            st.cache_data.clear()
+                            obras_edit = df_obras.copy()
+                            qtd_env = adicionar_fotos_obra(obras_edit, obra_up, fichs_fotos, url_ativa)
+                            recalcular_obras(url_ativa, obras_edit, df_diario)
+                            ler_servidor.clear()
                             st.session_state["aviso"] = f"{qtd_env} fotografia(s) associada(s) à obra {obra_up}!"
                             st.rerun()
                         except Exception as e:
@@ -1173,9 +1183,10 @@ elif aba == "⚙️ Tabelas":
             fotos_atuais_ob = separar_links_fotos(fotos_obras.get(obra_up, ""))
             if fotos_atuais_ob:
                 if st.button(f"🗑️ Limpar as {len(fotos_atuais_ob)} foto(s) desta obra", use_container_width=True):
-                    df_obras.loc[df_obras["ID Obra"] == obra_up, "Fotos"] = ""
-                    recalcular_obras(url_ativa, df_obras, df_diario)
-                    st.cache_data.clear()
+                    obras_edit = df_obras.copy()
+                    obras_edit.loc[obras_edit["ID Obra"] == obra_up, "Fotos"] = ""
+                    recalcular_obras(url_ativa, obras_edit, df_diario)
+                    ler_servidor.clear()
                     st.session_state["aviso"] = f"Fotografias removidas da obra {obra_up}!"
                     st.rerun()
 
@@ -1196,8 +1207,9 @@ elif aba == "⚙️ Tabelas":
     st.subheader("🏢 Obras Atribuídas")
     st.caption("Estados disponíveis: Nova, Execução, Parcial, Concluída.")
     outros_est = [e for e in df_obras["Estado"].unique().tolist() if e and e not in ESTADOS_OBRA]
+    cols_ed_o = ["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado", "PDF", "Fotos"]
     ed_o = st.data_editor(
-        df_obras[["ID Obra", "Nome da Obra", "Cliente", "Valor Adjudicado", "Estado", "PDF", "Fotos"]],
+        df_obras[cols_ed_o],
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
@@ -1220,14 +1232,29 @@ elif aba == "⚙️ Tabelas":
     ed_m = st.data_editor(df_mat, num_rows="dynamic", use_container_width=True, hide_index=True)
 
     if st.button("💾 Guardar Todas as Tabelas", type="primary", use_container_width=True):
-        ed_o["ID Obra"] = ed_o["ID Obra"].fillna("").astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-        ed_o["Valor Adjudicado"] = pd.to_numeric(ed_o["Valor Adjudicado"], errors="coerce").fillna(0.0)
-        ed_o["Total Gasto"] = 0.0
-        ed_o["Saldo Restante"] = ed_o["Valor Adjudicado"]
-        recalcular_obras(url_ativa, ed_o, df_diario)
-        guardar_elementos_e_users(url_ativa, ed_e, ed_u)
-        guardar_aba(url_ativa, "Meios", ed_v)
-        guardar_aba(url_ativa, "Materiais", ed_m)
-        st.cache_data.clear()
-        st.session_state["aviso"] = "Tabelas e utilizadores guardados!"
-        st.rerun()
+        with st.spinner("A guardar alterações..."):
+            guardadas = []
+            if not df_igual(ed_o, df_obras[cols_ed_o]):
+                ed_o_save = ed_o.copy()
+                ed_o_save["ID Obra"] = ed_o_save["ID Obra"].fillna("").astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+                ed_o_save["Valor Adjudicado"] = pd.to_numeric(ed_o_save["Valor Adjudicado"], errors="coerce").fillna(0.0)
+                ed_o_save["Total Gasto"] = 0.0
+                ed_o_save["Saldo Restante"] = ed_o_save["Valor Adjudicado"]
+                recalcular_obras(url_ativa, ed_o_save, df_diario)
+                guardadas.append("Obras")
+            if not df_igual(ed_e, df_elem) or not df_igual(ed_u, df_users):
+                guardar_elementos_e_users(url_ativa, ed_e, ed_u)
+                guardadas.append("Colaboradores/Acessos")
+            if not df_igual(ed_v, df_meios):
+                guardar_aba(url_ativa, "Meios", ed_v)
+                guardadas.append("Viaturas")
+            if not df_igual(ed_m, df_mat):
+                guardar_aba(url_ativa, "Materiais", ed_m)
+                guardadas.append("Materiais")
+
+            if guardadas:
+                ler_servidor.clear()
+                st.session_state["aviso"] = f"Guardado: {', '.join(guardadas)}!"
+            else:
+                st.session_state["aviso"] = "Sem alterações para guardar."
+            st.rerun()
